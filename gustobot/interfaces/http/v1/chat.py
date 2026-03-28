@@ -1,7 +1,7 @@
 """
-Unified Chat API with Agent Integration
+与 Agent 集成的统一聊天 API。
 
-Provides a single endpoint for chat interactions with automatic routing.
+提供单一聊天入口，支持自动路由。
 """
 import asyncio
 import json
@@ -24,23 +24,23 @@ from sqlalchemy.orm import Session
 
 router = APIRouter()
 
-
+# 客户端调用聊天接口时传入的请求体
 class ChatRequest(BaseModel):
-    """Chat request model"""
-    message: str = Field(..., description="User message", min_length=1, max_length=5000)
-    session_id: Optional[str] = Field(None, description="Session ID for conversation continuity")
-    user_id: Optional[str] = Field("default_user", description="User identifier")
-    stream: bool = Field(False, description="Enable streaming response")
-    image_path: Optional[str] = Field(None, description="Path to uploaded image file")
-    file_path: Optional[str] = Field(None, description="Path to uploaded file")
+    """聊天请求模型"""
+    message: str = Field(..., description="用户消息", min_length=1, max_length=5000)
+    session_id: Optional[str] = Field(None, description="会话 ID，用于多轮对话延续")
+    user_id: Optional[str] = Field("default_user", description="用户标识")
+    stream: bool = Field(False, description="是否启用流式响应")
+    image_path: Optional[str] = Field(None, description="已上传图片文件路径")
+    file_path: Optional[str] = Field(None, description="已上传文件路径")
     ingest_incremental: Optional[bool] = Field(
         None,
-        description="Override whether Excel ingestion uses incremental mode (defaults to server setting)",
+        description="是否覆盖 Excel 导入的增量模式（默认沿用服务端配置）",
     )
 
-
+# 聊天接口返回的响应体
 class ChatResponse(BaseModel):
-    """Chat response model"""
+    """聊天响应模型"""
     message: str
     session_id: str
     message_id: str
@@ -50,44 +50,44 @@ class ChatResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
     timestamp: datetime = Field(default_factory=datetime.now)
 
-
+# 流式输出时每一小块的数据
 class ChatStreamChunk(BaseModel):
-    """Streaming response chunk"""
-    type: str = Field(..., description="Chunk type: 'message', 'metadata', 'error', 'done'")
+    """流式响应分片"""
+    type: str = Field(..., description="分片类型：'message'、'metadata'、'error'、'done'")
     content: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     session_id: Optional[str] = None
     route: Optional[str] = None
 
-
+# 获取已有会话；不存在则新建。
 def get_or_create_session(db: Session, session_id: Optional[str], user_id: str) -> str:
-    """Get existing session or create new one"""
+    """获取已有会话；不存在则新建"""
     if session_id:
         session = chat_session.get(db, id=session_id)
         if session:
             return session_id
 
-    # Create new session
+    # 新建会话
     new_session_id = str(uuid.uuid4())
     session_data = ChatSessionCreate(
         id=new_session_id,
         user_id=user_id,
-        title=f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        title=f"聊天 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     )
     chat_session.create(db, obj_in=session_data)
     return new_session_id
 
-
+# 将消息保存到数据库。
 async def save_message(db: Session, session_id: str, message: str, is_user: bool,
                        route: Optional[str] = None, metadata: Optional[Dict] = None):
-    """Save message to database"""
+    """将消息保存到数据库"""
     try:
         last_message = chat_message.get_latest_by_session(db, session_id=session_id)
         next_order_index = (last_message.order_index + 1) if last_message else 1
 
         message_metadata: Dict[str, Any] = {}
         if isinstance(metadata, dict):
-            # Avoid persisting huge/unstable objects (e.g. full agent graph state).
+            # 避免持久化体积过大或不稳定对象（例如完整 agent 图状态）
             message_metadata.update({k: v for k, v in metadata.items() if k != "agent_state"})
         elif metadata is not None:
             message_metadata["metadata"] = str(metadata)
@@ -104,19 +104,19 @@ async def save_message(db: Session, session_id: str, message: str, is_user: bool
         )
         created = chat_message.create(db, obj_in=message_data)
 
-        # Update session activity timestamp so session list ordering stays correct.
+        # 更新会话活跃时间，保证会话列表排序正确
         chat_session.update_activity(db, session_id=session_id)
         return str(created.id)
     except Exception as e:
         logger.error(f"Failed to save message: {e}")
         return None
 
-
+# 通过 Agent 系统处理查询
 async def process_agent_query(message: str, session_id: str,
                             image_path: Optional[str] = None,
                             file_path: Optional[str] = None,
                             ingest_incremental: Optional[bool] = None) -> Dict[str, Any]:
-    """Process query through agent system"""
+    """通过 Agent 系统处理查询"""
     incremental_flag = (
         settings.INGEST_INCREMENTAL_DEFAULT if ingest_incremental is None else bool(ingest_incremental)
     )
@@ -134,31 +134,31 @@ async def process_agent_query(message: str, session_id: str,
     }
 
     try:
-        # Invoke agent graph
+        # 调用 Agent 图
         result = await graph.ainvoke(input_state, config=config)
 
-        # Extract response and metadata
+        # 提取回复与元数据
         response_text = ""
         if result.get("messages"):
             response_text = result["messages"][-1].content
 
-        # Extract route information
+        # 提取路由信息
         router_info = result.get("router", {})
         route = router_info.get("type")
         route_logic = router_info.get("logic")
 
-        # Extract sources if available
+        # 若有则提取来源
         sources_raw = result.get("sources", [])
 
-        # Convert sources to expected format (list of dicts)
+        # 将来源转为期望格式（字典列表）
         sources = []
         if sources_raw:
-            # If sources is a list of strings, convert to list of dicts
+            # 若来源为字符串列表，则转为字典列表
             if isinstance(sources_raw[0], str):
                 for src in sources_raw:
                     sources.append({"document_id": src, "source": src})
             else:
-                # Already in correct format
+                # 已是正确格式
                 sources = sources_raw
 
         return {
@@ -181,13 +181,13 @@ async def process_agent_query(message: str, session_id: str,
             "metadata": {"error": str(e)}
         }
 
-
+# 流式输出 Agent 回复。
 async def stream_agent_response(message: str, session_id: str,
                                image_path: Optional[str] = None,
                                file_path: Optional[str] = None,
                                ingest_incremental: Optional[bool] = None) -> AsyncGenerator[str, None]:
-    """Stream agent response"""
-    # Send initial metadata
+    """流式输出 Agent 回复"""
+    # 发送初始元数据
     metadata_chunk = ChatStreamChunk(
         type="metadata",
         metadata={"status": "processing"},
@@ -196,10 +196,10 @@ async def stream_agent_response(message: str, session_id: str,
     yield f"data: {metadata_chunk.model_dump_json()}\n\n"
 
     try:
-        # Process the query
+        # 处理查询
         result = await process_agent_query(message, session_id, image_path, file_path, ingest_incremental)
 
-        # Send route information
+        # 发送路由信息
         route_chunk = ChatStreamChunk(
             type="metadata",
             metadata={"route": result["route"], "logic": result["route_logic"]},
@@ -208,7 +208,7 @@ async def stream_agent_response(message: str, session_id: str,
         )
         yield f"data: {route_chunk.model_dump_json()}\n\n"
 
-        # Stream the response message (simulated - in real implementation, you'd stream from LLM)
+        # 流式发送回复正文（模拟；实际实现中可从 LLM 流式获取）
         response_text = result["message"]
         words = response_text.split()
         current_text = ""
@@ -221,9 +221,9 @@ async def stream_agent_response(message: str, session_id: str,
                 session_id=session_id
             )
             yield f"data: {message_chunk.model_dump_json()}\n\n"
-            await asyncio.sleep(0.05)  # Simulate streaming delay
+            await asyncio.sleep(0.05)  # 模拟流式延迟
 
-        # Send done signal
+        # 发送结束信号
         done_chunk = ChatStreamChunk(
             type="done",
             metadata={"sources": result.get("sources", [])},
@@ -232,7 +232,7 @@ async def stream_agent_response(message: str, session_id: str,
         yield f"data: {done_chunk.model_dump_json()}\n\n"
 
     except Exception as e:
-        # Send error
+        # 发送错误
         error_chunk = ChatStreamChunk(
             type="error",
             content=f"处理请求时出错: {str(e)}",
@@ -240,7 +240,7 @@ async def stream_agent_response(message: str, session_id: str,
         )
         yield f"data: {error_chunk.model_dump_json()}\n\n"
 
-
+# 非流式场景下，完成一次完整对话轮次（含持久化）。chat 是跑完 Agent → 存助手回复 → 一次 JSON；
 @router.post("/", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
@@ -248,19 +248,19 @@ async def chat(
     db: Session = Depends(get_db)
 ) -> ChatResponse:
     """
-    Unified chat endpoint with automatic agent routing
+    统一聊天接口，自动进行 Agent 路由。
 
-    - Automatically routes queries to appropriate agents
-    - Maintains conversation history
-    - Supports file uploads and images
+    - 将查询路由到合适的 Agent
+    - 维护对话历史
+    - 支持文件与图片
     """
-    # Get or create session
+    # 获取或新建会话
     session_id = get_or_create_session(db, request.session_id, request.user_id)
 
-    # Save user message
+    # 保存用户消息
     await save_message(db, session_id, request.message, is_user=True)
 
-    # Process through agent
+    # 经 Agent 处理
     effective_incremental = (
         request.ingest_incremental
         if request.ingest_incremental is not None
@@ -275,7 +275,7 @@ async def chat(
         effective_incremental,
     )
 
-    # Save assistant message
+    # 保存助手回复
     message_id = await save_message(
         db,
         session_id,
@@ -295,15 +295,14 @@ async def chat(
         metadata=result.get("metadata")
     )
 
-
 # ---------------------------------------------------------------------------
-# Legacy alias routes (backwards compatibility)
+# 旧版别名路由（向后兼容）
 #
-# Older docs/scripts use `/api/v1/chat/chat` and `/api/v1/chat/chat/stream`.
-# Keep them working to reduce migration friction.
+# 旧文档/脚本仍使用 `/api/v1/chat/chat` 与 `/api/v1/chat/chat/stream`。
+# 保留这些路由以降低迁移成本。
 # ---------------------------------------------------------------------------
 
-
+# 旧版别名路由（向后兼容）
 @router.post("/chat", response_model=ChatResponse, include_in_schema=False)
 async def chat_legacy(
     request: ChatRequest,
@@ -312,21 +311,22 @@ async def chat_legacy(
 ) -> ChatResponse:
     return await chat(request, background_tasks, db)
 
-
+# 流式场景下，完成一次完整对话轮次。chat_stream 是存用户消息 → 不在这个函数里存助手回复 → 用 SSE 边推边显示
+# TODO 没有把 AI 助手回复写入数据库
 @router.post("/stream")
 async def chat_stream(
     request: ChatRequest,
     db: Session = Depends(get_db)
 ) -> StreamingResponse:
     """
-    Streaming chat endpoint with automatic agent routing
+    流式聊天接口，自动进行 Agent 路由。
 
-    Returns responses in Server-Sent Events (SSE) format
+    以 Server-Sent Events（SSE）格式返回响应。
     """
-    # Get or create session
+    # 获取或新建会话
     session_id = get_or_create_session(db, request.session_id, request.user_id)
 
-    # Save user message
+    # 保存用户消息
     await save_message(db, session_id, request.message, is_user=True)
 
     effective_incremental = (
@@ -335,7 +335,7 @@ async def chat_stream(
         else settings.INGEST_INCREMENTAL_DEFAULT
     )
 
-    # Return streaming response
+    # 返回流式响应
     return StreamingResponse(
         stream_agent_response(
             request.message,
@@ -348,11 +348,11 @@ async def chat_stream(
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"  # Disable nginx buffering
+            "X-Accel-Buffering": "no"  # 关闭 nginx 缓冲
         }
     )
 
-
+# 旧版别名路由（向后兼容）
 @router.post("/chat/stream", include_in_schema=False)
 async def chat_stream_legacy_post(
     request: ChatRequest,
@@ -360,7 +360,7 @@ async def chat_stream_legacy_post(
 ) -> StreamingResponse:
     return await chat_stream(request, db)
 
-
+# 旧版别名路由（向后兼容）
 @router.get("/chat/stream", include_in_schema=False)
 async def chat_stream_legacy_get(
     message: str = Query(..., min_length=1, max_length=5000),
@@ -391,17 +391,17 @@ async def get_chat_history(
     offset: int = Query(0, ge=0)
 ) -> List[ChatMessageResponse]:
     """
-    Get chat history for a session
+    获取指定会话的聊天历史。
     """
-    # Verify session exists
+    # 校验会话是否存在
     session = chat_session.get(db, id=session_id)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found"
+            detail="会话不存在"
         )
 
-    # Get messages
+    # 拉取消息列表
     messages = chat_message.get_by_session(
         db,
         session_id=session_id,
@@ -418,25 +418,25 @@ async def clear_session(
     db: Session = Depends(get_db)
 ) -> Dict[str, str]:
     """
-    Clear all messages in a session
+    清空会话内的全部消息。
     """
     session = chat_session.get(db, id=session_id)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found"
+            detail="会话不存在"
         )
 
-    # Delete all messages in session
+    # 删除该会话下全部消息
     chat_message.delete_by_session(db, session_id=session_id)
 
-    return {"message": "Session cleared successfully", "session_id": session_id}
+    return {"message": "会话已清空", "session_id": session_id}
 
 
 @router.get("/routes")
 async def get_route_info() -> Dict[str, Any]:
     """
-    Get information about available routes and their purposes
+    返回可用路由及其用途说明。
     """
     return {
         "routes": {
