@@ -1,4 +1,4 @@
-﻿from gustobot.application.agents.lg_prompts import (
+from gustobot.application.agents.lg_prompts import (
     ROUTER_SYSTEM_PROMPT,
     GET_ADDITIONAL_SYSTEM_PROMPT,
     GENERAL_QUERY_SYSTEM_PROMPT,
@@ -45,19 +45,19 @@ import io
 from langchain_openai import ChatOpenAI
 from gustobot.application.agents.kb_tools import create_knowledge_query_node, KnowledgeQueryInputState
 from gustobot.infrastructure.knowledge import KnowledgeService
+
 class AdditionalGuardrailsOutput(BaseModel):
-    """
-    格式化输出，用于判断用户的问题是否与图谱内容相关
-    """
+    """结构化输出：判断用户问题是否与图谱内容相关。"""
+
     decision: Literal["end", "proceed"] = Field(
-        description="Decision on whether the question is related to the graph contents."
+        description="问题是否与图谱内容相关：end 表示拒绝，proceed 表示继续。"
     )
 
 
 # 构建日志记录器
 logger = get_logger(service="lg_builder")
 
-
+# 单下划线开头表示 “internal use”，提醒维护者：别在别的模块里随便依赖它
 def _ensure_router(router_obj: Any, *, fallback_question: str = "") -> Router:
     """将任意 router 结构转换为 Router 模型，保持字段访问兼容。"""
     if isinstance(router_obj, Router):
@@ -71,16 +71,24 @@ def _ensure_router(router_obj: Any, *, fallback_question: str = "") -> Router:
 
 
 def _extract_configurable(config: Any) -> Dict[str, Any]:
-    """提取 LangGraph RunnableConfig 中的 configurable 字段，确保返回字典。"""
+    """从 LangGraph 的 RunnableConfig 里取出 ``configurable`` 子字典。
+
+    LangGraph 会把调用方传入的 thread_id、image_path、file_path 等放在
+    ``config["configurable"]``（或对象的 ``.configurable``）里；本函数统一
+    成普通 ``dict``，避免上层既可能是 dict 又可能是带属性的 config 对象。
+
+    若缺失或类型不对则返回空字典，保证调用方总能 ``.get()``。
+    """
     if not config:
         return {}
     if isinstance(config, dict):
         value = config.get("configurable", {})
         return value if isinstance(value, dict) else {}
-    # LangGraph RunnableConfig 支持属性访问或字典接口
+    # RunnableConfig：优先属性 .configurable
     configurable = getattr(config, "configurable", None)
     if isinstance(configurable, dict):
         return configurable
+    # 少数实现像 dict 一样提供 .get
     getter = getattr(config, "get", None)
     if callable(getter):
         try:
@@ -92,39 +100,43 @@ def _extract_configurable(config: Any) -> Dict[str, Any]:
     return {}
 
 def _coerce_to_bool(value: Any, *, default: bool = False) -> bool:
-    """Best-effort conversion of dynamic configuration values to boolean."""
+    """把环境变量、HTTP 查询串等「弱类型」配置转成 bool。
+
+    - ``None``：返回 ``default``（未配置时的默认行为）。
+    - 字符串：仅当去掉空白并小写后为 1/true/yes/y/on 时为真（兼容常见 env 写法）。
+    - 其他类型：走 Python ``bool(value)``（如数字 0 为假、非 0 为真）。
+    """
     if value is None:
         return default
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return bool(value)
 
-
+# 意图识别与路由决策
 async def analyze_and_route_query(
         state: AgentState, *, config: RunnableConfig
 ) -> dict[str, Router]:
-    """Analyze the user's query and determine the appropriate routing.
+    """分析用户查询并确定路由分支。
 
-    This function uses a language model to classify the user's query and decide how to route it
-    within the conversation flow.
+    使用大模型对用户问题进行分类，决定在对话流中的下一步走向。
 
-    Args:
-        state (AgentState): The current state of the agent, including conversation history.
-        config (RunnableConfig): Configuration with the model used for query analysis.
+    参数:
+        state: 当前 Agent 状态，含对话历史。
+        config: 运行配置（含用于路由分析的模型等）。
 
-    Returns:
-        dict[str, Router]: A dictionary containing the 'router' key with the classification result (classification type and logic).
+    返回:
+        包含 ``router`` 键的字典，值为分类结果（类型与逻辑说明等）。
     """
 
     if not settings.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured for router analysis.")
 
     model = ChatOpenAI(
-        openai_api_key=settings.OPENAI_API_KEY,
-        model_name=settings.OPENAI_MODEL,
-        openai_api_base=settings.OPENAI_API_BASE,
-        temperature=0.7,
-        tags=["router"],
+        openai_api_key=settings.OPENAI_API_KEY, # API 密钥
+        model_name=settings.OPENAI_MODEL, # 模型名称
+        openai_api_base=settings.OPENAI_API_BASE, # API 根地址
+        temperature=0.7, 
+        tags=["router"], # 标签
     )
 
     # 拼接提示模版 + 用户的实时问题（包含历史上下文对话）
@@ -134,6 +146,7 @@ async def analyze_and_route_query(
     logger.info("-----Analyze user query type-----")
     logger.info(f"History messages: {state.messages}")
 
+    # state.messages[-1] 是 LangChain 里的一条消息（例如 HumanMessage、AIMessage 等，类型上属于 AnyMessage）。这些消息对象都有一个 content 字段，表示这条消息的正文
     question_text = state.messages[-1].content if state.messages else ""
     heuristic_router = _heuristic_router(question_text)
     fallback_router: Router = heuristic_router or Router(
@@ -166,7 +179,6 @@ async def analyze_and_route_query(
         logger.warning(
             "Router returned invalid type `%s`; applying heuristic fallback.", router_type
         )
-        heuristic_router = _heuristic_router(question_text)
         if heuristic_router:
             sanitized = heuristic_router
             if not sanitized.logic:
@@ -189,22 +201,22 @@ async def analyze_and_route_query(
         reasoning=response.reasoning,
     )
 
-    # Heuristic router is only used when the LLM output is invalid (handled above).
+    # 大模型输出已通过校验时不再叠加启发式；启发式仅在上文失败分支中使用。
     logger.info(f"Analyze user query type completed, result: {sanitized_router}")
     return {"router": sanitized_router}
 
-
+# 返回值是节点名字符串
 def route_query(
         state: AgentState,
-) -> Literal[
-    "respond_to_general_query", "get_additional_info", "create_research_plan", "create_image_query", "create_file_query", "create_kb_query"]:
+) -> Literal["respond_to_general_query", "get_additional_info", "create_research_plan", "create_image_query", "create_file_query", "create_kb_query"]:
     """根据查询分类确定下一步操作。
 
-    Args:
-        state (AgentState): 当前代理状态，包括路由器的分类。
+    参数:
+        state: 当前 Agent 状态，含路由器分类结果。
 
-    Returns:
-        Literal["respond_to_general_query", "get_additional_info", "create_research_plan", "create_image_query", "create_file_query"，"create_kb_query"]: 下一步操作。
+    返回:
+        下一个节点名称：respond_to_general_query / get_additional_info / create_research_plan /
+        create_image_query / create_file_query / create_kb_query。
     """
     router = _ensure_router(getattr(state, "router", None), fallback_question=state.messages[-1].content if state.messages else "")
     state.router = router
@@ -233,19 +245,19 @@ def route_query(
     elif _type=="kb-query":
         return "create_kb_query"
     else:
-        raise ValueError(f"Unknown router type {_type}")
+        raise ValueError(f"未知的路由类型：{_type}")
 
-
+# 一般问答（仅大模型，不调外部工具）
 async def respond_to_general_query(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
     """生成对一般查询的响应，完全基于大模型，不会触发任何外部服务的调用，包括自定义工具、知识库查询等。
     当路由器将查询分类为一般问题时，将调用此节点。
-    Args:
-        state (AgentState): 当前代理状态，包括对话历史和路由逻辑。
-        config (RunnableConfig): 用于配置响应生成的模型。
-    Returns:
-        Dict[str, List[BaseMessage]]: 包含'messages'键的字典，其中包含生成的响应。
+    参数:
+        state: 当前 Agent 状态，含对话历史与路由逻辑。
+        config: 用于配置生成回复所用模型。
+    返回:
+        包含 ``messages`` 键的字典，值为生成的消息列表。
     """
     logger.info("-----generate general-query response-----")
 
@@ -264,7 +276,7 @@ async def respond_to_general_query(
     response = await model.ainvoke(messages)
     return {"messages": [response]}
 
-#大模型生成输出多了一些额外消息
+# 大模型在「补充信息」分支下可能产生额外消息，由下游按需处理。
 async def get_additional_info(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
@@ -272,12 +284,12 @@ async def get_additional_info(
 
     当路由确定需要从用户那里获取更多信息时，将调用此函数。
 
-    Args:
-        state (AgentState): 当前代理状态，包括对话历史和路由逻辑。
-        config (RunnableConfig): 用于配置响应生成的模型。
+    参数:
+        state: 当前 Agent 状态，含对话历史与路由逻辑。
+        config: 用于配置生成回复所用模型。
 
-    Returns:
-        Dict[str, List[BaseMessage]]: 包含'messages'键的字典，其中包含生成的响应。
+    返回:
+        包含 ``messages`` 键的字典，值为生成的消息列表。
     """
     logger.info("------continue to get additional info------")
 
@@ -352,13 +364,13 @@ async def get_additional_info(
         ]
     )
 
-    # 构建格式化输出的 Chain， 如果匹配，返回 continue，否则返回 end
+    # 构建带结构化输出的链：护栏通过则 proceed，否则 end。
     guardrails_chain = full_system_prompt | model.with_structured_output(AdditionalGuardrailsOutput)
     guardrails_output: AdditionalGuardrailsOutput = await guardrails_chain.ainvoke(
         {"question": state.messages[-1].content if state.messages else ""}
     )
 
-    # 空值检查：如果 LLM 返回 None，默认为 proceed
+    # 空值保护：大模型若返回 None，则视为 proceed
     if guardrails_output is None:
         logger.warning("Guardrails returned None, defaulting to proceed")
         guardrails_output = AdditionalGuardrailsOutput(decision="proceed")
@@ -380,17 +392,17 @@ async def get_additional_info(
 
 
 async def _generate_image(user_query: str, state: AgentState) -> Dict[str, List[BaseMessage]]:
-    """使用CogView-4 API生成图片
+    """使用 CogView-4 API 根据用户描述生成图片。
 
-    Args:
-        user_query: 用户的图片生成请求
-        state: 当前代理状态
+    参数:
+        user_query: 用户的图片生成请求文本。
+        state: 当前 Agent 状态。
 
-    Returns:
-        包含生成图片信息的消息字典
+    返回:
+        包含 ``messages`` 键的字典，内容为带图片链接等信息的助手回复。
     """
     try:
-        # 步骤1: 使用LLM优化用户提示词
+        # 步骤 1：使用大模型优化用户提示词
         model = ChatOpenAI(
             model=settings.LLM_MODEL,
             api_key=settings.LLM_API_KEY,
@@ -406,7 +418,7 @@ async def _generate_image(user_query: str, state: AgentState) -> Dict[str, List[
         enhanced_prompt = enhanced_response.content.strip()
         logger.info(f"Enhanced prompt: {enhanced_prompt}")
 
-        # 步骤2: 调用CogView-4 API生成图片
+        # 步骤 2：调用 CogView-4 API 生成图片
         api_key = settings.IMAGE_GENERATION_API_KEY
         base_url = settings.IMAGE_GENERATION_BASE_URL
         model_name = settings.IMAGE_GENERATION_MODEL
@@ -416,7 +428,7 @@ async def _generate_image(user_query: str, state: AgentState) -> Dict[str, List[
             logger.error("IMAGE_GENERATION_API_KEY not configured")
             return {"messages": [AIMessage(content="抱歉，图片生成服务配置不完整，无法生成图片。")]}
 
-        # 构建API请求
+        # 构建 API 请求
         api_url = f"{base_url}/images/generations"
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -431,7 +443,7 @@ async def _generate_image(user_query: str, state: AgentState) -> Dict[str, List[
         logger.info(f"Calling CogView-4 API: {api_url}")
         logger.info(f"Payload: model={model_name}, size={size}")
 
-        # 异步HTTP请求
+        # 异步 HTTP 请求
         async with aiohttp.ClientSession() as session:
             async with session.post(api_url, json=payload, headers=headers, timeout=60) as resp:
                 if resp.status != 200:
@@ -442,7 +454,7 @@ async def _generate_image(user_query: str, state: AgentState) -> Dict[str, List[
                 result = await resp.json()
                 logger.info(f"CogView-4 API response: {json.dumps(result, ensure_ascii=False)}")
 
-        # 步骤3: 解析响应获取图片URL
+        # 步骤 3：解析响应，获取图片 URL
         if "data" not in result or len(result["data"]) == 0:
             logger.error(f"CogView-4 API returned no image data: {result}")
             return {"messages": [AIMessage(content="抱歉，图片生成失败，请稍后再试。")]}
@@ -454,14 +466,14 @@ async def _generate_image(user_query: str, state: AgentState) -> Dict[str, List[
 
         logger.info(f"Image generated successfully: {image_url}")
 
-        # 步骤4: 提取菜名（简单处理）
+        # 步骤 4：从查询中提取菜名（简单关键词匹配）
         dish_name = "菜品"
         for keyword in ["宫保鸡丁", "红烧肉", "麻婆豆腐", "糖醋排骨", "鱼香肉丝"]:
             if keyword in user_query:
                 dish_name = keyword
                 break
 
-        # 步骤5: 格式化成功响应
+        # 步骤 5：格式化成功回复文案
         success_message = IMAGE_GENERATION_SUCCESS_PROMPT.format(dish_name=dish_name)
         response_content = f"{success_message}\n\n图片链接: {image_url}"
 
@@ -478,14 +490,14 @@ async def _generate_image(user_query: str, state: AgentState) -> Dict[str, List[
 async def create_image_query(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
-    """处理图片查询并生成描述回复
+    """处理图片相关查询：支持文生图、上传图识别，并生成助手回复。
 
-    Args:
-        state (AgentState): 当前代理状态，包括对话历史
-        config (RunnableConfig): 配置参数，包含线程ID等配置信息
+    参数:
+        state: 当前 Agent 状态，含对话历史。
+        config: 运行配置（如 configurable 中的 image_path、线程 ID 等）。
 
-    Returns:
-        Dict[str, List[BaseMessage]]: 包含'messages'键的字典，其中包含生成的响应
+    返回:
+        包含 ``messages`` 键的字典，值为生成的消息列表。
     """
     logger.info("-----Handle Image Query-----")
     image_path = config.get("configurable", {}).get("image_path", None)
@@ -495,12 +507,12 @@ async def create_image_query(
     generation_keywords = ["生成", "画", "创建", "制作图片", "做一张", "给我一张", "来一张"]
     is_generation = any(keyword in user_query for keyword in generation_keywords)
 
-    # 情况1: 用户要求生成图片（没有上传图片，或明确要求生成）
+    # 情况 1：用户要求生成图片（未上传图片或明确要生成）
     if is_generation and not image_path:
         logger.info(f"Image Generation Request: {user_query}")
         return await _generate_image(user_query, state)
 
-    # 情况2: 用户上传了图片，进行识别
+    # 情况 2：用户已上传图片，走视觉识别
     if not image_path:
         logger.warning(f"User Upload Image Path is None for recognition")
         return {"messages": [AIMessage(content="抱歉，我无法查看这张图片，请重新上传。")]}
@@ -537,20 +549,20 @@ async def create_image_query(
                 new_height = int(height * ratio)
                 resized_img = img.resize((new_width, new_height), Image.LANCZOS)
 
-            # 转换为JPEG格式，并调整质量
+            # 转为 JPEG 并控制压缩质量
             img_byte_arr = io.BytesIO()
             if resized_img.mode != 'RGB':
                 resized_img = resized_img.convert('RGB')
             resized_img.save(img_byte_arr, format='JPEG', quality=85)
             img_byte_arr.seek(0)
 
-            # 转换为base64
+            # 转为 Base64 供视觉 API 使用
             image_data = base64.b64encode(img_byte_arr.read()).decode('utf-8')
 
             logger.info(
                 f"Image Compressed, Original Size: {width}x{height}, New Size: {resized_img.width}x{resized_img.height}")
 
-        # 构建API请求
+        # 构建视觉 API 请求
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}"
@@ -579,22 +591,21 @@ async def create_image_query(
             "temperature": 0.7
         }
 
-        # 发送API请求
+        # 调用视觉接口
         async with aiohttp.ClientSession() as session:
             async with session.post(
                     f"{base_url}/chat/completions",
                     headers=headers,
                     json=payload,
-                    timeout=60  # 增加超时时间
+                    timeout=60  # 视觉推理较慢，适当延长超时
             ) as response:
                 if response.status == 200:
                     result = await response.json()
                     image_description = result["choices"][0]["message"]["content"]
                     logger.info(f"Successfully processed image and generated description")
-                    # 使用图片描述和用户问题生成最终回复
-                    # 从lg_prompts导入菜谱助手模板
+                    # 结合图片描述与用户问题，用 lg_prompts 中的模板生成最终回复
 
-                    # 构建回复请求
+                    # 第二次调用：文本大模型整理回答
                     model = ChatOpenAI(openai_api_key=settings.OPENAI_API_KEY, model_name=settings.OPENAI_MODEL,
                                        openai_api_base=settings.OPENAI_API_BASE, temperature=0.7,
                                        tags=["image_query"])
@@ -622,7 +633,7 @@ async def create_image_query(
 async def create_file_query(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
-    """Handle user-provided files for ingestion."""
+    """处理用户上传文件：Excel 走外部接入服务，文本类写入知识库并可追问。"""
 
     logger.info("-----Found User Upload File-----")
     config_opts = _extract_configurable(config)
@@ -647,7 +658,7 @@ async def create_file_query(
             return {"messages": [AIMessage(content=f"文件过大（>{settings.FILE_UPLOAD_MAX_MB}MB），请分割后重新上传。")]}
 
         if suffix in {".xlsx", ".xls"}:
-            # Excel must be handled by external ingestion service
+            # Excel 必须由外部接入服务处理
             if not ingest_service_url:
                 return {"messages": [AIMessage(content="未配置外部接入服务 INGEST_SERVICE_URL，无法处理 Excel 导入。")]}
             incremental_flag = _coerce_to_bool(
@@ -711,7 +722,7 @@ async def create_file_query(
 async def create_kb_query(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
-    """Query the vector knowledge base (and optional external API) via a multi-agent workflow."""
+    """通过多工具工作流查询向量知识库（可选外部检索 API）；失败时回退为直连检索节点。"""
     logger.info("------execute KB multi-tool query------")
 
     last_message = state.messages[-1].content if state.messages else ""
@@ -774,16 +785,15 @@ async def create_kb_query(
         answer_text = response.get("answer") or "检索完成，但暂时没有可以分享的结果。"
         sources = response.get("sources", [])
 
-        # 创建包含sources的AIMessage
+        # 构造 AIMessage，并在 additional_kwargs 中附带 sources 供接口层读取
         ai_message = AIMessage(content=answer_text)
-        # 将sources附加到消息的additional_kwargs中
         ai_message.additional_kwargs["sources"] = sources
 
         return {"messages": [ai_message], "sources": sources}
     except Exception as exc:
         logger.warning("KB multi-tool workflow unavailable (%s); falling back to direct search.", exc)
 
-    # Fallback: direct KB query
+    # 回退路径：不经过子工作流，直接调用知识查询节点
     if knowledge_service is None:
         knowledge_service = KnowledgeService()
     knowledge_node = create_knowledge_query_node(knowledge_service=knowledge_service)
@@ -800,18 +810,18 @@ async def create_kb_query(
     answer_text = result.get("answer", "") or "抱歉，我暂时无法从知识库中找到答案。"
     return {"messages": [AIMessage(content=answer_text)]}
 
-# 图工具 查询节点
+# 图谱多工具子图入口（GraphRAG / Cypher / Text2SQL 等）
 async def create_research_plan(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[str] | str]:
-    """通过查询本地图知识库回答客户问题，执行任务分解，创建分布查询计划。
+    """基于本地图与结构化数据回答用户：组装多工具工作流并执行（含任务分解与工具编排）。
 
-    Args:
-        state (AgentState): 当前代理状态，包括对话历史。
-        config (RunnableConfig): 用于配置计划生成的模型。
+    参数:
+        state: 当前 Agent 状态，含对话历史。
+        config: 运行配置（如所用模型等）。
 
-    Returns:
-        Dict[str, List[str] | str]: 包含'steps'键的字典，其中包含研究步骤列表。
+    返回:
+        包含助手 ``messages`` 的字典（最终答案在 AIMessage 正文中）。
     """
     logger.info("------execute local knowledge base query------")
 
@@ -827,8 +837,7 @@ async def create_research_plan(
         tags=["research_plan"],
     )
 
-    # 初始化必要参数
-    #  Neo4j图数据库连接 - 使用配置中的连接信息
+    # 初始化 Neo4j 连接（连接信息来自配置）
     neo4j_graph=None
     try:
         neo4j_graph = get_neo4j_graph()
@@ -836,10 +845,10 @@ async def create_research_plan(
     except Exception as e:
         logger.error(f"failed to get Neo4j graph database connection: {e}")
 
-    #  创建菜谱场景的检索器实例，根据 Graph Schema创建 Cypher ， 优先生成对应问题的cypher模版 用来引导大模型生成正确的Cypher查询语句
+    # 菜谱场景 Cypher Few-shot 检索器：据图 Schema 拉取示例，引导模型生成合法 Cypher
     cypher_retriever = RecipeCypherRetriever()
 
-    #  定义工具模式列表
+    # 子图中可选工具的结构化模式（供工具选择节点使用）
     from gustobot.application.agents.kg_sub_graph.kg_tools_list import (
         cypher_query,
         predefined_cypher,
@@ -853,7 +862,7 @@ async def create_research_plan(
         text2sql_query,
     ]
 
-    #  预定义的Cypher查询 为菜谱场景定义有用的查询
+    # 预定义 Cypher 模板（高频问法快速命中）
     from gustobot.application.agents.kg_sub_graph.agentic_rag_agents.components.predefined_cypher.cypher_dict import \
         predefined_cypher_dict
 
@@ -895,8 +904,8 @@ async def create_research_plan(
         llm_cypher_validation=True,
     )
 
-    # return multi_tool_workflow
-    # 准备输入状态
+    # 调试需要时可改为：return multi_tool_workflow
+    # 组装子图输入
     last_message = state.messages[-1].content if state.messages else ""
     input_state = {
         "question": last_message,
@@ -913,17 +922,16 @@ async def create_research_plan(
 async def check_hallucinations(
         state: AgentState, *, config: RunnableConfig
 ) -> dict[str, Any]:
-    """Analyze the user's query and checks if the response is supported by the set of facts based on the document retrieved,
-    providing a binary score result.
+    """根据检索到的文档事实，判断当前生成内容是否与之相符，输出二分类评分。
 
-    This function uses a language model to analyze the user's query and gives a binary score result.
+    使用大模型对「用户问题 + 已生成回复 + 文档依据」做一致性打分。
 
-    Args:
-        state (AgentState): The current state of the agent, including conversation history.
-        config (RunnableConfig): Configuration with the model used for query analysis.
+    参数:
+        state: 当前 Agent 状态，需包含 ``documents`` 与最新 ``messages``。
+        config: 运行配置（所用判定模型等）。
 
-    Returns:
-        dict[str, Router]: A dictionary containing the 'router' key with the classification result (classification type and logic).
+    返回:
+        包含 ``hallucination`` 键的字典，值为 ``GradeHallucinations`` 结构化结果。
     """
     if not settings.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured for hallucination checks.")
@@ -954,24 +962,26 @@ async def check_hallucinations(
 
 checkpointer = MemorySaver()
 
-# 定义状态图
+# 主状态图：入口为意图识别，经条件边分发到各业务节点
 builder = StateGraph(AgentState, input=InputState)
-# 添加节点
-builder.add_node(analyze_and_route_query) # 意图识别
-builder.add_node(respond_to_general_query)#默认回复
-builder.add_node(get_additional_info) # 图结构信息
-builder.add_node("create_research_plan", create_research_plan)  # 这里是graphrag neo4j-query
-builder.add_node(create_image_query)
-builder.add_node(create_file_query)
-builder.add_node(create_kb_query)
+# 注册节点
+# 只传函数一个参数时，LangGraph 会用函数的 __name__ 作为节点名
+builder.add_node(analyze_and_route_query)  # 意图识别与路由决策
+builder.add_node(respond_to_general_query)  # 一般问答（仅大模型，不调外部工具）
+builder.add_node(get_additional_info)  # 补充信息 / 护栏与引导话术
+builder.add_node("create_research_plan", create_research_plan)  # 图谱多工具（GraphRAG、Cypher、Text2SQL 等）
+builder.add_node(create_image_query)  # 文生图或视觉识别
+builder.add_node(create_file_query)  # 文件接入与知识库写入
+builder.add_node(create_kb_query)  # 向量知识库多工具工作流
 
 
-# 添加边
+# 边：START → 路由节点 → 条件边按 route_query 结果跳转
 builder.add_edge(START, "analyze_and_route_query")
 builder.add_conditional_edges("analyze_and_route_query", route_query)
 
 graph = builder.compile(checkpointer=checkpointer)
 
+# 以下为可选调试：将 LangGraph 导出为 PNG 或在 Notebook 中展示（需 graphviz / IPython 等依赖）
 # png_bytes = graph.get_graph().draw_mermaid_png()
 # output_path = Path(__file__).resolve().parent / "lg_builder_workflow.png"
 # output_path.write_bytes(png_bytes)
@@ -979,12 +989,12 @@ graph = builder.compile(checkpointer=checkpointer)
 #
 # try:
 #     from IPython.display import Image as IPythonImage, display as ipython_display
-# except ImportError:  # pragma: no cover - optional dependency
+# except ImportError:  # pragma: no cover - 可选依赖
 #     logger.info("IPython 未安装，跳过图像内联展示。")
 # else:
 #     ipython_display(IPythonImage(png_bytes))
 def _heuristic_router(question: str) -> Optional[Router]:
-    """Fallback routing based on simple keyword heuristics."""
+    """基于关键词的简单启发式路由，作为大模型路由失败时的兜底。"""
     if not question:
         return None
 
@@ -1023,7 +1033,7 @@ def _heuristic_router(question: str) -> Optional[Router]:
 
 
 def build_supervisor_graph():
-    """向后兼容的 Supervisor Graph 构建接口。"""
+    """向后兼容接口：返回已编译的主 Agent 状态图（旧称 Supervisor Graph）。"""
     return graph
 
 

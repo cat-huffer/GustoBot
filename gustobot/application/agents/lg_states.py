@@ -6,7 +6,7 @@ from langgraph.graph import add_messages
 
 
 class Router(BaseModel):
-    """Classify user query (同时兼容旧字段/属性访问)."""
+    """对用户查询做分类（同时兼容旧字段/属性访问）。"""
 
     logic: str = ""
     type: Literal[
@@ -27,78 +27,60 @@ class Router(BaseModel):
         extra = "allow"
 
     def get(self, key: str, default: Any = None) -> Any:
-        """字典风格访问兼容旧逻辑。"""
+        """以字典风格访问，兼容旧逻辑。"""
         return getattr(self, key, self.__dict__.get(key, default))
 
 
 @dataclass(kw_only=True)
 class RouteResult:
-    """Route selection result for downstream nodes."""
+    """路由选择结果，供下游节点使用。"""
     route: str
     confidence: float = 0.0
     next_node: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+
 class GradeHallucinations(BaseModel):
-    """Binary score for hallucination present in generation answer."""
+    """对生成答案是否出现幻觉的二元评分。"""
 
     binary_score: str = Field(
-        description="Answer is grounded in the facts, '1' or '0'"
+        description="答案是否基于事实：'1' 表示是，'0' 表示否"
     )
+
 
 @dataclass(kw_only=True)
 class InputState:
-    """Represents the input state for the agent.
+    """Agent 的输入状态结构。
 
-    This class defines the structure of the input state, which includes
-    the messages exchanged between the user and the agent. 
+    包含用户与 Agent 之间的消息列表。`messages` 使用 `add_messages` 归约：
+    合并两条消息列表，按 ID 更新已有消息；默认可视为追加，若新消息与某条已有消息
+    ID 相同则替换。
+
+    典型模式为 Human / AI 交替；若结合带工具调用的 ReAct，大致为：
+    1. HumanMessage：用户输入
+    2. 含 .tool_calls 的 AIMessage：选择要调用的工具
+    3. ToolMessage：工具执行结果或错误
+    （按需重复 2、3）
+    4. 不含 .tool_calls 的 AIMessage：以自然语言回复用户
+    5. HumanMessage：下一轮用户输入
+    （按需重复 2–5）
     """
 
+    # messages 的类型是消息列表，且在状态更新时用 add_messages 规则做合并
     messages: Annotated[list[AnyMessage], add_messages]
-    
-    """Messages track the primary execution state of the agent.
 
-    Typically accumulates a pattern of Human/AI/Human/AI messages; if
-    you were to combine this template with a tool-calling ReAct agent pattern,
-    it may look like this:
-
-    1. HumanMessage - user input
-    2. AIMessage with .tool_calls - agent picking tool(s) to use to collect
-         information
-    3. ToolMessage(s) - the responses (or errors) from the executed tools
-    
-        (... repeat steps 2 and 3 as needed ...)
-    4. AIMessage without .tool_calls - agent responding in unstructured
-        format to the user.
-
-    5. HumanMessage - user responds with the next conversational turn.
-
-        (... repeat steps 2-5 as needed ... )
-    
-
-    Merges two lists of messages, updating existing messages by ID.
-
-    By default, this ensures the state is "append-only", unless the
-    new message has the same ID as an existing message.
-    
-
-    Returns:
-        A new list of messages with the messages from `right` merged into `left`.
-        If a message in `right` has the same ID as a message in `left`, the
-        message from `right` will replace the message from `left`."""
-    
-
+# kw_only：强制要求数据类中的所有字段必须以关键字参数的形式提供。即不能以位置参数的方式传递。
 @dataclass(kw_only=True)
 class AgentState(InputState):
-    """State of the retrieval graph / agent."""
+    """检索图 / Agent 的运行状态。"""
+    # 路由器对用户问题的分类结果
     router: Router = field(default_factory=lambda: Router(type="general-query", logic=""))
-    """The router's classification of the user's query."""
+    # 由检索等环节填充，Agent 可参考的步骤/轨迹说明列表
     steps: list[str] = field(default_factory=list)
-    """Populated by the retriever. This is a list of documents that the agent can reference."""
+    # 从知识库检索到的文档片段等
     documents: list[str] = field(default_factory=list)
-    """Documents retrieved from the knowledge base."""
     question: str = field(default_factory=str)
     answer: str = field(default_factory=str)
     hallucination: GradeHallucinations = field(default_factory=lambda: GradeHallucinations(binary_score="0"))
+    # 知识库查询等返回的引用来源
     sources: list = field(default_factory=list)
-    """Sources from knowledge base queries."""
