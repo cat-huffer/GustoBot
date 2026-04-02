@@ -69,7 +69,7 @@ def _ensure_router(router_obj: Any, *, fallback_question: str = "") -> Router:
             pass
     return Router(type="kb-query", logic="missing router", question=fallback_question)
 
-
+# TODO 没懂在做什么
 def _extract_configurable(config: Any) -> Dict[str, Any]:
     """从 LangGraph 的 RunnableConfig 里取出 ``configurable`` 子字典。
 
@@ -300,6 +300,7 @@ async def get_additional_info(
     # 如果用户的问题是菜谱相关，但与自己的业务无关，则需要返回"无关问题"
 
     # 首先连接 Neo4j 图数据库
+    # 核心目的是让“是否继续回答/是否越界”的判断更贴近当前知识图谱实际结构，而不是只靠固定规则。
     try:
         neo4j_graph = get_neo4j_graph()
         logger.info("success to get Neo4j graph database connection")
@@ -309,30 +310,30 @@ async def get_additional_info(
 
     # 定义菜谱助手服务范围（用户友好的业务描述）
     scope_description = """
-    菜谱智能助手服务范围：为您提供全方位的烹饪指导和美食知识，包括但不限于：
+        菜谱智能助手服务范围：为您提供全方位的烹饪指导和美食知识，包括但不限于：
 
-    🍳 菜谱查询与制作指导
-    - 各类中华料理的详细做法和烹饪技巧
-    - 食材用量、烹饪时长、火候掌握
-    - 分步骤的烹饪指导和小贴士
+        🍳 菜谱查询与制作指导
+        - 各类中华料理的详细做法和烹饪技巧
+        - 食材用量、烹饪时长、火候掌握
+        - 分步骤的烹饪指导和小贴士
 
-    🥬 食材知识与营养价值
-    - 食材的营养成分和健康功效
-    - 食材的选购、储存和处理方法
-    - 食材之间的搭配和替代建议
+        🥬 食材知识与营养价值
+        - 食材的营养成分和健康功效
+        - 食材的选购、储存和处理方法
+        - 食材之间的搭配和替代建议
 
-    🌶️ 口味与烹饪技法
-    - 各种口味特点（麻辣、酱香、清淡等）
-    - 不同烹饪方法（炒、蒸、煮、炖、烤等）
-    - 菜品分类（热菜、凉菜、汤品、主食等）
+        🌶️ 口味与烹饪技法
+        - 各种口味特点（麻辣、酱香、清淡等）
+        - 不同烹饪方法（炒、蒸、煮、炖、烤等）
+        - 菜品分类（热菜、凉菜、汤品、主食等）
 
-    💊 食疗养生建议
-    - 食材的中医食疗功效
-    - 季节性饮食调理建议
-    - 特定人群的饮食注意事项
+        💊 食疗养生建议
+        - 食材的中医食疗功效
+        - 季节性饮食调理建议
+        - 特定人群的饮食注意事项
 
-    暂不支持：政治、娱乐八卦、新闻时事、天气预报、网购推荐、医疗诊断等非烹饪美食相关内容。
-    如遇此类问题，我会礼貌地引导您回到烹饪美食话题～
+        暂不支持：政治、娱乐八卦、新闻时事、天气预报、网购推荐、医疗诊断等非烹饪美食相关内容。
+        如遇此类问题，我会礼貌地引导您回到烹饪美食话题～
     """
 
     scope_context = (
@@ -390,7 +391,7 @@ async def get_additional_info(
         response = await model.ainvoke(messages)
         return {"messages": [response]}
 
-
+# 图片生成
 async def _generate_image(user_query: str, state: AgentState) -> Dict[str, List[BaseMessage]]:
     """使用 CogView-4 API 根据用户描述生成图片。
 
@@ -486,7 +487,7 @@ async def _generate_image(user_query: str, state: AgentState) -> Dict[str, List[
         logger.error(f"Error generating image: {e}", exc_info=True)
         return {"messages": [AIMessage(content=f"抱歉，图片生成过程中出现错误：{str(e)}")]}
 
-
+# 处理图片相关查询：支持文生图、上传图识别，并生成助手回复。
 async def create_image_query(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
@@ -629,7 +630,7 @@ async def create_image_query(
         logger.error(f"Error processing image: {str(e)}")
         return {"messages": [AIMessage(content=f"抱歉，我无法查看这张图片，请重新上传。")]}
 
-
+# 处理文件相关查询：支持Excel导入、文本类文件写入知识库，并可追问。
 async def create_file_query(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
@@ -719,6 +720,7 @@ async def create_file_query(
         logger.exception("Failed to ingest uploaded file: %s", exc)
         return {"messages": [AIMessage(content="文件导入出现异常，请稍后再试或联系管理员。")]}
 
+# 处理知识库查询：通过多工具工作流查询向量知识库（可选外部检索 API）；失败时回退为直连检索节点。
 async def create_kb_query(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
@@ -918,7 +920,7 @@ async def create_research_plan(
     response = await multi_tool_workflow.ainvoke(input_state)
     return {"messages": [AIMessage(content=response["answer"])]}
 
-
+# 检查是否存在幻觉：使用大模型对「用户问题 + 已生成回复 + 文档依据」做一致性打分。
 async def check_hallucinations(
         state: AgentState, *, config: RunnableConfig
 ) -> dict[str, Any]:
