@@ -1,3 +1,12 @@
+"""GustoBot Agent 命令行入口：加载 ``lg_builder.graph`` 并交互式处理用户查询。
+
+使用 LangGraph ``MemorySaver`` 与随机 ``thread_id``；调用 ``graph.astream`` 时采用
+``stream_mode='messages'`` 按块打印。入图前用 ``RemoveMessage`` 按轮数裁剪历史，避免
+上下文无限增长。环境变量 ``GUSTOBOT_MEMORY_TURNS``（或 ``GUSTOBOT_MAX_MEMORY_TURNS``）
+控制保留的用户轮数；≤0 表示不裁剪。若运行结束仍存在 ``interrupts``，可输入 ``y`` 以
+``Command(resume)`` 继续生成。
+"""
+
 import sys
 import os
 from pathlib import Path
@@ -21,7 +30,11 @@ thread = {"configurable": {"thread_id": new_uuid()}}
 
 
 def _resolve_memory_turn_limit() -> Optional[int]:
-    """Resolve configured memory turns, treating non-positive values as unlimited."""
+    """读取环境变量中的「记忆轮数」上限。
+
+    优先 ``GUSTOBOT_MEMORY_TURNS``，否则 ``GUSTOBOT_MAX_MEMORY_TURNS``；默认字符串 ``"2"``。
+    非整数时回退为 ``5``。返回值 ≤0 时视为不限制（返回 ``None``），此时不会删除历史消息。
+    """
     raw_value = os.getenv("GUSTOBOT_MEMORY_TURNS", os.getenv("GUSTOBOT_MAX_MEMORY_TURNS", "2"))
     try:
         value = int(raw_value)
@@ -34,7 +47,12 @@ MEMORY_TURN_LIMIT: Optional[int] = _resolve_memory_turn_limit()
 
 
 def _select_messages_to_remove(existing: Sequence[BaseMessage]) -> List[BaseMessage]:
-    """Determine which historical messages should be dropped to respect the turn limit."""
+    """在不超过 ``MEMORY_TURN_LIMIT`` 的前提下，选出应通过 ``RemoveMessage`` 删除的旧消息。
+
+    从后往前数用户（human）消息，保留最近 ``MEMORY_TURN_LIMIT - 1`` 轮用户发言之前的所有
+    带 ``id`` 的消息作为待删列表；若保留轮数为 0 则删除所有有 id 的历史。无限制（``None``）
+    或空列表时返回空列表。
+    """
     if not existing or MEMORY_TURN_LIMIT is None:
         return []
 
@@ -58,7 +76,11 @@ def _select_messages_to_remove(existing: Sequence[BaseMessage]) -> List[BaseMess
 
 
 def _stringify_content(content: object) -> str:
-    """Convert streamed message content into printable text."""
+    """将 LangChain 消息的 ``content`` 转成可打印字符串。
+
+    支持 ``str``、``list``（多模态块：字符串或含 ``text`` 键的 dict）及其它类型的 ``str()``。
+    ``None`` 返回空串。
+    """
     if content is None:
         return ""
     if isinstance(content, str):
@@ -77,6 +99,13 @@ def _stringify_content(content: object) -> str:
 
 
 async def process_query(query: str) -> None:
+    """执行一轮对话：裁剪历史、注入用户消息、流式打印助手回复并处理可选中断。
+
+    先 ``graph.get_state`` 取当前消息列表，按轮数生成 ``RemoveMessage``，再追加
+    ``HumanMessage``，以 ``InputState`` 调用 ``graph.astream``。打印时跳过元数据中
+    ``tags`` 含 ``research_plan`` 的块（避免计划文本混入终端输出）。若结束后仍有
+    ``interrupts``，提示用户输入 ``y`` 以 ``Command(resume)`` 继续流式输出。
+    """
     state_snapshot = graph.get_state(thread)
     existing_messages = list(state_snapshot.values.get("messages", []))
     messages_to_remove = _select_messages_to_remove(existing_messages)
@@ -117,6 +146,7 @@ async def process_query(query: str) -> None:
 
 
 async def main() -> None:
+    """REPL 主循环：读取 ``> `` 前缀输入，``q`` 退出，其余交给 :func:`process_query`。"""
     input_func = builtins.input
     while True:
         query = input_func("> ")

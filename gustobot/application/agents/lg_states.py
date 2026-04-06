@@ -1,3 +1,9 @@
+"""LangGraph Agent 的状态与路由相关数据模型。
+
+``InputState`` / ``AgentState`` 供 ``lg_builder`` 中 ``StateGraph`` 使用；``Router`` 为
+意图分类结构化输出；``GradeHallucinations`` 供幻觉检测节点写入状态。
+"""
+
 from pydantic import BaseModel, Field
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Dict, List, Literal, Optional
@@ -6,9 +12,13 @@ from langgraph.graph import add_messages
 
 
 class Router(BaseModel):
-    """对用户查询做分类（同时兼容旧字段/属性访问）。"""
+    """对用户查询做意图分类的结构化结果（Pydantic，允许 ``extra`` 以兼容旧字段）。
 
-    logic: str = ""
+    ``type`` 取值与主图条件边一致，如 ``general-query``、``graphrag-query``、``kb-query`` 等。
+    ``get(key)`` 方法可按类字典方式读取动态字段。
+    """
+
+    logic: str = "" # 路由给出的分类理由
     type: Literal[
         "general-query",
         "additional-query",
@@ -17,11 +27,11 @@ class Router(BaseModel):
         "image-query",
         "file-query",
         "text2sql-query",
-    ] = "kb-query"
-    question: str = ""
-    decision: Optional[str] = None
-    confidence: Optional[float] = None
-    reasoning: Optional[str] = None
+    ] = "kb-query" # 默认路由到知识库查询
+    question: str = "" # 用户问题文本
+    decision: Optional[str] = None # 护栏判定：继续处理或结束
+    confidence: Optional[float] = None # 置信度：0-1，表示模型对分类的信心程度
+    reasoning: Optional[str] = None # 推理过程：模型对分类的推理过程
 
     class Config:
         extra = "allow"
@@ -33,7 +43,10 @@ class Router(BaseModel):
 
 @dataclass(kw_only=True)
 class RouteResult:
-    """路由选择结果，供下游节点使用。"""
+    """路由选择结果（名称、置信度、下一节点与附加元数据）。
+
+    可与 ``Router`` 配合使用，用于需要显式 ``next_node`` 字符串的编排逻辑。
+    """
     route: str
     confidence: float = 0.0
     next_node: str = ""
@@ -41,7 +54,7 @@ class RouteResult:
 
 
 class GradeHallucinations(BaseModel):
-    """对生成答案是否出现幻觉的二元评分。"""
+    """对「模型回复是否严格依据检索事实」的二元评分（字符串 ``'1'`` / ``'0'``）。"""
 
     binary_score: str = Field(
         description="答案是否基于事实：'1' 表示是，'0' 表示否"
@@ -72,7 +85,17 @@ class InputState:
 # kw_only：强制要求数据类中的所有字段必须以关键字参数的形式提供。即不能以位置参数的方式传递。
 @dataclass(kw_only=True)
 class AgentState(InputState):
-    """检索图 / Agent 的运行状态。"""
+    """在 ``InputState`` 之上扩展的完整 Agent 状态，贯穿主图各节点。
+
+    字段说明：
+
+    - ``router``：意图分类结果，决定条件边走向。
+    - ``steps``：可选的中间步骤说明（如检索轨迹），供调试或展示。
+    - ``documents``：检索到的文本依据，供幻觉检测等节点使用。
+    - ``question`` / ``answer``：可缓存规范化问题或最终答案（按节点写入）。
+    - ``hallucination``：幻觉评分结构化结果。
+    - ``sources``：引用来源列表，常与知识库返回一并更新。
+    """
     # 路由器对用户问题的分类结果
     router: Router = field(default_factory=lambda: Router(type="general-query", logic=""))
     # 由检索等环节填充，Agent 可参考的步骤/轨迹说明列表

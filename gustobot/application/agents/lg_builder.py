@@ -1,3 +1,14 @@
+"""菜谱助手主 LangGraph：意图路由、多分支应答与知识/图谱/文件/图片能力编排。
+
+``StateGraph(AgentState, input=InputState)`` 从 ``START`` 进入 ``analyze_and_route_query``，
+经 ``route_query`` 条件边分发到一般问答、补充信息、图谱多工具、图片、文件或向量知识库等节点。
+编译结果导出为模块级 ``graph``（带 ``MemorySaver`` 检查点），供 ``main`` 或 API 层
+``astream`` / ``ainvoke``。
+
+依赖 ``lg_prompts`` 中的系统提示、``lg_states`` 中的状态类型，以及 Neo4j / Milvus 等配置；
+各节点函数签名统一为 ``(state, *, config)``，返回对 ``AgentState`` 的部分更新字典。
+"""
+
 from gustobot.application.agents.lg_prompts import (
     ROUTER_SYSTEM_PROMPT,
     GET_ADDITIONAL_SYSTEM_PROMPT,
@@ -47,7 +58,10 @@ from gustobot.application.agents.kb_tools import create_knowledge_query_node, Kn
 from gustobot.infrastructure.knowledge import KnowledgeService
 
 class AdditionalGuardrailsOutput(BaseModel):
-    """结构化输出：判断用户问题是否与图谱内容相关。"""
+    """``get_additional_info`` 中护栏链的结构化输出（与 ``GUARDRAILS_SYSTEM_PROMPT`` 配合）。
+
+    ``end``：超出服务范围，返回固定拒绝话术；``proceed``：继续走补充信息提示模板。
+    """
 
     decision: Literal["end", "proceed"] = Field(
         description="问题是否与图谱内容相关：end 表示拒绝，proceed 表示继续。"
@@ -59,7 +73,11 @@ logger = get_logger(service="lg_builder")
 
 # 单下划线开头表示 “internal use”，提醒维护者：别在别的模块里随便依赖它
 def _ensure_router(router_obj: Any, *, fallback_question: str = "") -> Router:
-    """将任意 router 结构转换为 Router 模型，保持字段访问兼容。"""
+    """将路由结果统一为 ``Router`` 实例。
+
+    已为 ``Router`` 则原样返回；``dict`` 则 ``Router.model_validate``；失败时返回默认
+    ``kb-query`` 并带上 ``fallback_question``。
+    """
     if isinstance(router_obj, Router):
         return router_obj
     if isinstance(router_obj, dict):
@@ -116,16 +134,21 @@ def _coerce_to_bool(value: Any, *, default: bool = False) -> bool:
 async def analyze_and_route_query(
         state: AgentState, *, config: RunnableConfig
 ) -> dict[str, Router]:
-    """分析用户查询并确定路由分支。
+    """调用带 ``Router`` 结构化输出的聊天模型，对用户最后一轮消息做意图分类。
 
-    使用大模型对用户问题进行分类，决定在对话流中的下一步走向。
+    先用 :func:`_heuristic_router` 得到兜底路由；若 LLM 调用失败或返回非法 ``type``，
+    则回退到启发式或默认 ``kb-query``。合法类型集合与 ``Router.type`` 的 Literal 一致。
+    模型带 ``tags=["router"]``，便于流式输出时过滤。
 
-    参数:
-        state: 当前 Agent 状态，含对话历史。
-        config: 运行配置（含用于路由分析的模型等）。
+    Args:
+        state: 含 ``messages``；最后一条通常为用户当前问句。
+        config: LangGraph 传入的 runnable 配置（本函数体未强依赖，保留签名统一）。
 
-    返回:
-        包含 ``router`` 键的字典，值为分类结果（类型与逻辑说明等）。
+    Returns:
+        字典 ``router`` 键对应 ``Router`` 实例，供 ``route_query`` 读取。
+
+    Raises:
+        RuntimeError: 未配置 ``OPENAI_API_KEY`` 时。
     """
 
     if not settings.OPENAI_API_KEY:
@@ -205,18 +228,19 @@ async def analyze_and_route_query(
     logger.info(f"Analyze user query type completed, result: {sanitized_router}")
     return {"router": sanitized_router}
 
-# 返回值是节点名字符串
 def route_query(
         state: AgentState,
 ) -> Literal["respond_to_general_query", "get_additional_info", "create_research_plan", "create_image_query", "create_file_query", "create_kb_query"]:
-    """根据查询分类确定下一步操作。
+    """读取 ``state.router.type``，返回 LangGraph 条件边的下一节点名。
 
-    参数:
-        state: 当前 Agent 状态，含路由器分类结果。
+    若 ``state`` 上存在 ``config.configurable`` 且含 ``image_path`` / ``file_path``，
+    优先走向图片或文件节点（覆盖纯文本路由结果）。未知类型抛 ``ValueError``。
 
-    返回:
-        下一个节点名称：respond_to_general_query / get_additional_info / create_research_plan /
-        create_image_query / create_file_query / create_kb_query。
+    Args:
+        state: 已写入 ``router`` 的 Agent 状态。
+
+    Returns:
+        六个业务节点之一的名字符串，与 ``builder.add_node`` 注册名一致。
     """
     router = _ensure_router(getattr(state, "router", None), fallback_question=state.messages[-1].content if state.messages else "")
     state.router = router
@@ -251,13 +275,16 @@ def route_query(
 async def respond_to_general_query(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
-    """生成对一般查询的响应，完全基于大模型，不会触发任何外部服务的调用，包括自定义工具、知识库查询等。
-    当路由器将查询分类为一般问题时，将调用此节点。
-    参数:
-        state: 当前 Agent 状态，含对话历史与路由逻辑。
-        config: 用于配置生成回复所用模型。
-    返回:
-        包含 ``messages`` 键的字典，值为生成的消息列表。
+    """一般闲聊分支：仅用 ``GENERAL_QUERY_SYSTEM_PROMPT`` + 历史消息调用 LLM，不调工具。
+
+    系统提示中注入 ``router.logic``（路由给出的分类理由）。模型带 ``tags=["general_query"]``。
+
+    Args:
+        state: 含 ``messages`` 与 ``router``。
+        config: 保留统一签名。
+
+    Returns:
+        形如 ``{"messages": [AIMessage(...)]}``，单条助手回复。
     """
     logger.info("-----generate general-query response-----")
 
@@ -277,23 +304,25 @@ async def respond_to_general_query(
     return {"messages": [response]}
 
 # 大模型在「补充信息」分支下可能产生额外消息，由下游按需处理。
+# 先判是否在菜谱业务内，再决定是拒答还是生成追问话术。 它不在这里查知识库、也不跑图谱/知识库工作流，只负责对话策略与话术。
 async def get_additional_info(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
-    """生成一个响应，要求用户提供更多信息。
+    """「补充信息」分支：先做业务范围护栏，再通过模型生成追问话术。
 
-    当路由确定需要从用户那里获取更多信息时，将调用此函数。
+    第一段链：``GUARDRAILS_SYSTEM_PROMPT`` + 服务范围/Neo4j Schema 上下文，结构化输出
+    ``AdditionalGuardrailsOutput``；``decision == "end"`` 时直接返回礼貌拒答 ``AIMessage``。
+    否则使用 ``GET_ADDITIONAL_SYSTEM_PROMPT``（注入 ``router.logic``）生成追问。
 
-    参数:
-        state: 当前 Agent 状态，含对话历史与路由逻辑。
-        config: 用于配置生成回复所用模型。
+    Args:
+        state: 含 ``messages`` 与 ``router``。
+        config: 保留与图节点统一签名；内部主要使用默认 ``ChatOpenAI``。
 
-    返回:
-        包含 ``messages`` 键的字典，值为生成的消息列表。
+    Returns:
+        形如 ``{"messages": [AIMessage(...)]}``。
     """
     logger.info("------continue to get additional info------")
 
-    # 使用大模型生成回复
     model = ChatOpenAI(openai_api_key=settings.OPENAI_API_KEY, model_name=settings.OPENAI_MODEL,
                        openai_api_base=settings.OPENAI_API_BASE, temperature=0.7,
                        tags=["additional_info"])
@@ -371,17 +400,13 @@ async def get_additional_info(
         {"question": state.messages[-1].content if state.messages else ""}
     )
 
-    # 空值保护：大模型若返回 None，则视为 proceed
-    if guardrails_output is None:
-        logger.warning("Guardrails returned None, defaulting to proceed")
-        guardrails_output = AdditionalGuardrailsOutput(decision="proceed")
-
     # 根据格式化输出的结果，返回不同的响应
     if guardrails_output.decision == "end":
         logger.info("-----Fail to pass guardrails check-----")
         return {"messages": [AIMessage(content="厨友您好～抱歉哦，这个问题不太属于我们的菜谱范围呢，我主要帮您解答菜谱和烹饪方面的问题～😊")]}
     else:
         logger.info("-----Pass guardrails check-----")
+        # 取出其中的 logic，告诉补问模型「系统认为缺什么信息」，好生成更贴题的追问
         router = _ensure_router(getattr(state, "router", None), fallback_question=state.messages[-1].content if state.messages else "")
         state.router = router
         system_prompt = GET_ADDITIONAL_SYSTEM_PROMPT.format(
@@ -393,14 +418,26 @@ async def get_additional_info(
 
 # 图片生成
 async def _generate_image(user_query: str, state: AgentState) -> Dict[str, List[BaseMessage]]:
-    """使用 CogView-4 API 根据用户描述生成图片。
+    """根据用户描述生成菜谱相关图片（文生图）。
 
-    参数:
-        user_query: 用户的图片生成请求文本。
-        state: 当前 Agent 状态。
+    流程：
+        1. 使用 ``settings.LLM_*`` 构造 ``ChatOpenAI``，按 ``IMAGE_GENERATION_ENHANCE_PROMPT``
+           将 ``user_query`` 扩写为更适合作画的提示词。
+        2. 向 ``IMAGE_GENERATION_BASE_URL`` 下的 ``/images/generations`` 发送 JSON POST（OpenAI/CogView
+           兼容：``model``、``prompt``、``size``），需配置 ``IMAGE_GENERATION_API_KEY``。
+        3. 从响应 ``data[0].url`` 取图片地址；成功文案由 ``IMAGE_GENERATION_SUCCESS_PROMPT`` 格式化，
+           ``dish_name`` 由 ``user_query`` 与内置菜名关键词列表简单匹配，未命中则默认为「菜品」。
 
-    返回:
-        包含 ``messages`` 键的字典，内容为带图片链接等信息的助手回复。
+    失败与异常：
+        未配置 API Key、HTTP 非 200、响应无 ``data`` 或无 ``url``、请求超时（``asyncio.TimeoutError``）
+        或其它异常时，均返回单条 ``AIMessage`` 说明原因，不向上抛出。
+
+    Args:
+        user_query: 用户输入的自然语言（期望与菜品/画面相关）。
+        state: 当前 Agent 状态；本函数体内未读取，保留参数供调用方与后续扩展一致。
+
+    Returns:
+        ``{"messages": [AIMessage(content=...)]}``；成功时 ``content`` 含成功话术与「图片链接: …」行。
     """
     try:
         # 步骤 1：使用大模型优化用户提示词
@@ -491,14 +528,28 @@ async def _generate_image(user_query: str, state: AgentState) -> Dict[str, List[
 async def create_image_query(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
-    """处理图片相关查询：支持文生图、上传图识别，并生成助手回复。
+    """处理图片相关请求：文生图或上传图的视觉理解。
 
-    参数:
-        state: 当前 Agent 状态，含对话历史。
-        config: 运行配置（如 configurable 中的 image_path、线程 ID 等）。
+    分支判定（按代码顺序）：
+        1. **文生图**：用户最后一条消息含生成类关键词（如「生成」「画」「创建图片」「做一张」
+           等），且 **未** 提供 ``image_path`` 时，调用 :func:`_generate_image`（LLM 扩写提示词
+           + CogView 兼容 HTTP）。不依赖本地上传文件。
+        2. **上传图理解**：需要 ``config["configurable"]["image_path"]`` 指向**已存在**的本地
+           文件。缺失或路径无效时返回提示重新上传。依赖 ``VISION_API_KEY``、``VISION_BASE_URL``、
+           ``VISION_MODEL``：用 Pillow 将图缩放到最长边不超过 1024、转 JPEG Base64，POST
+           ``{VISION_BASE_URL}/chat/completions`` 多模态消息获取图片描述，再将描述注入
+           ``GET_IMAGE_SYSTEM_PROMPT``，用 ``OPENAI_*`` 配置的 ``ChatOpenAI`` 结合
+           ``state.messages`` 生成最终回复。
 
-    返回:
-        包含 ``messages`` 键的字典，值为生成的消息列表。
+    若用户既未触发文生图关键词、又未提供有效 ``image_path``，会提示无法查看图片。
+
+    Args:
+        state: Agent 状态；取 ``messages[-1].content`` 作为用户指令，视觉成功分支会将完整
+            ``state.messages`` 交给文本模型。
+        config: RunnableConfig；从 ``configurable.image_path`` 读取上传图片的本地路径（若存在）。
+
+    Returns:
+        ``{"messages": [AIMessage(...)]}``。视觉或文生图失败、异常、配置不全时多为简短错误话术。
     """
     logger.info("-----Handle Image Query-----")
     image_path = config.get("configurable", {}).get("image_path", None)
@@ -623,9 +674,6 @@ async def create_image_query(
                     logger.error(f"Vision API Request Failed: {response.status} - {error_text}")
                     return {"messages": [AIMessage(content=f"抱歉，我无法查看这张图片，请重新上传。")]}
 
-
-
-
     except Exception as e:
         logger.error(f"Error processing image: {str(e)}")
         return {"messages": [AIMessage(content=f"抱歉，我无法查看这张图片，请重新上传。")]}
@@ -634,7 +682,19 @@ async def create_image_query(
 async def create_file_query(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
-    """处理用户上传文件：Excel 走外部接入服务，文本类写入知识库并可追问。"""
+    """文件分支：Excel/xls 调用 ``INGEST_SERVICE_URL`` 外部导入；文本类读入后 ``KnowledgeService.add_document``。
+
+    支持后缀与大小受 ``settings`` 约束；纯文本入库后可再调 ``create_knowledge_query_node``
+    用用户原问句做一次检索回答。``configurable`` 中 ``incremental`` / ``regenerate`` 仅对
+    Excel 分支生效（经 :func:`_coerce_to_bool`）。
+
+    Args:
+        state: 用户消息与对话历史。
+        config: 使用 :func:`_extract_configurable` 取 ``file_path`` 等。
+
+    Returns:
+        形如 ``{"messages": [AIMessage(...)]}``。
+    """
 
     logger.info("-----Found User Upload File-----")
     config_opts = _extract_configurable(config)
@@ -697,6 +757,7 @@ async def create_file_query(
         import uuid
         doc_id = f"upload_{p.stem}_{uuid.uuid4().hex[:6]}"
         title = p.stem
+        # 写进知识库
         success = await service.add_document(
             doc_id=doc_id,
             title=title,
@@ -705,7 +766,8 @@ async def create_file_query(
         )
         if not success:
             return {"messages": [AIMessage(content="文件已读取，但保存到知识库失败，请稍后重试。")]}
-
+            
+        # 查询知识库
         knowledge_node = create_knowledge_query_node(knowledge_service=service)
         user_question = state.messages[-1].content if state.messages else title
         input_state: KnowledgeQueryInputState = {
@@ -724,7 +786,19 @@ async def create_file_query(
 async def create_kb_query(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
-    """通过多工具工作流查询向量知识库（可选外部检索 API）；失败时回退为直连检索节点。"""
+    """向量知识库：优先 ``create_kb_multi_tool_workflow``（LLM 选工具 + Milvus + 可选外部搜索）。
+
+    ``configurable`` 可覆盖 ``kb_top_k``、``kb_similarity_threshold``、``kb_filter_expr``。
+    工作流异常时记录警告并回退到 ``create_knowledge_query_node`` 单次检索。成功时
+    ``AIMessage.additional_kwargs["sources"]`` 附带引用列表。
+
+    Args:
+        state: 用最后一条用户消息作为检索问句。
+        config: RunnableConfig，从中抽取 ``configurable``。
+
+    Returns:
+        含 ``messages``，成功时可能另含 ``sources`` 状态字段。
+    """
     logger.info("------execute KB multi-tool query------")
 
     last_message = state.messages[-1].content if state.messages else ""
@@ -759,6 +833,7 @@ async def create_kb_query(
         if not external_url and settings.INGEST_SERVICE_URL:
             external_url = f"{settings.INGEST_SERVICE_URL.rstrip('/')}/api/search"
 
+        # 护栏 + 路由 + ingest 上的 PostgreSQL + Milvus + 可选外部 HTTP + 最终 LLM 合成回答
         workflow = create_kb_multi_tool_workflow(
             llm=llm,
             knowledge_service=knowledge_service,
@@ -816,14 +891,21 @@ async def create_kb_query(
 async def create_research_plan(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[str] | str]:
-    """基于本地图与结构化数据回答用户：组装多工具工作流并执行（含任务分解与工具编排）。
+    """图谱 / 结构化问数：``graphrag-query`` 与 ``text2sql-query`` 共用入口。
 
-    参数:
-        state: 当前 Agent 状态，含对话历史。
-        config: 运行配置（如所用模型等）。
+    组装 ``create_multi_tool_workflow``：Neo4j、Cypher 示例检索、预定义模板、GraphRAG、
+    Text2SQL 等工具 schema，将用户问题与工作流输出的 ``answer`` 封装为单条 ``AIMessage``。
+    ``input_state["route_type"]`` 来自当前 ``Router.type``，供子图区分策略。
 
-    返回:
-        包含助手 ``messages`` 的字典（最终答案在 AIMessage 正文中）。
+    Args:
+        state: 含 ``messages`` 与 ``router``。
+        config: 保留统一签名。
+
+    Returns:
+        形如 ``{"messages": [AIMessage(content=answer)]}``。
+
+    Raises:
+        RuntimeError: 未配置 ``OPENAI_API_KEY`` 时。
     """
     logger.info("------execute local knowledge base query------")
 
@@ -924,16 +1006,21 @@ async def create_research_plan(
 async def check_hallucinations(
         state: AgentState, *, config: RunnableConfig
 ) -> dict[str, Any]:
-    """根据检索到的文档事实，判断当前生成内容是否与之相符，输出二分类评分。
+    """用 ``CHECK_HALLUCINATIONS`` 模板将 ``state.documents`` 与最后一条生成对比，结构化输出评分。
 
-    使用大模型对「用户问题 + 已生成回复 + 文档依据」做一致性打分。
+    返回 ``GradeHallucinations``，其中 ``binary_score`` 为 ``'1'`` 表示未见明显幻觉、
+    ``'0'`` 表示可能编造。注意：模板中 ``generation=state.messages[-1]`` 会把消息对象
+    代入，依赖模型的字符串化行为。
 
-    参数:
-        state: 当前 Agent 状态，需包含 ``documents`` 与最新 ``messages``。
-        config: 运行配置（所用判定模型等）。
+    Args:
+        state: 需已有检索结果 ``documents`` 与待审的助手消息。
+        config: 保留统一签名。
 
-    返回:
-        包含 ``hallucination`` 键的字典，值为 ``GradeHallucinations`` 结构化结果。
+    Returns:
+        形如 ``{"hallucination": GradeHallucinations(...)}``。
+
+    Raises:
+        RuntimeError: 未配置 ``OPENAI_API_KEY`` 时。
     """
     if not settings.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured for hallucination checks.")
@@ -962,6 +1049,7 @@ async def check_hallucinations(
     return {"hallucination": response}
 
 
+# MemorySaver：进程内内存检查点，按 thread_id 保存状态（重启即丢失）
 checkpointer = MemorySaver()
 
 # 主状态图：入口为意图识别，经条件边分发到各业务节点
@@ -981,6 +1069,7 @@ builder.add_node(create_kb_query)  # 向量知识库多工具工作流
 builder.add_edge(START, "analyze_and_route_query")
 builder.add_conditional_edges("analyze_and_route_query", route_query)
 
+# 编译后的可执行图；与 checkpointer 组合后支持按 thread_id 恢复状态
 graph = builder.compile(checkpointer=checkpointer)
 
 # 以下为可选调试：将 LangGraph 导出为 PNG 或在 Notebook 中展示（需 graphviz / IPython 等依赖）
@@ -995,8 +1084,14 @@ graph = builder.compile(checkpointer=checkpointer)
 #     logger.info("IPython 未安装，跳过图像内联展示。")
 # else:
 #     ipython_display(IPythonImage(png_bytes))
+
+# 基于关键词的兜底路由（小写匹配）
 def _heuristic_router(question: str) -> Optional[Router]:
-    """基于关键词的简单启发式路由，作为大模型路由失败时的兜底。"""
+    """基于关键词的兜底路由（小写匹配）。
+
+    含「统计/多少/总数」等优先 ``text2sql-query``；含「怎么做/步骤/食材」等优先
+    ``graphrag-query``；否则返回 ``None``，由调用方再用默认 ``kb-query``。
+    """
     if not question:
         return None
 
@@ -1035,12 +1130,12 @@ def _heuristic_router(question: str) -> Optional[Router]:
 
 
 def build_supervisor_graph():
-    """向后兼容接口：返回已编译的主 Agent 状态图（旧称 Supervisor Graph）。"""
+    """向后兼容：返回模块级已 ``compile`` 的 ``graph``（旧称 Supervisor Graph）。"""
     return graph
 
-
+# 历史兼容入口：直接 ``await get_additional_info(...)``，行为与补充信息分支一致。
 async def safety_guardrails(
     state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[BaseMessage]]:
-    """兼容旧接口，复用 get_additional_info 的护栏逻辑。"""
+    """历史兼容入口：直接 ``await get_additional_info(...)``，行为与补充信息分支一致。"""
     return await get_additional_info(state, config=config)

@@ -1,3 +1,9 @@
+"""多工具工作流构建模块。
+
+提供基于 LangGraph 的图谱多工具 Agent 工作流（Neo4j / Cypher / 自定义工具等），
+以及面向企业知识库的多源检索（PostgreSQL、Milvus、外部 API）与安全护栏、合成回答工作流。
+"""
+
 from typing import Any, Dict, List, Optional, Literal
 
 from operator import add
@@ -61,13 +67,19 @@ from dataclasses import dataclass, field
 # 强制要求数据类中的所有字段必须以关键字参数的形式提供。即不能以位置参数的方式传递。
 @dataclass(kw_only=True)
 class AgentState(InputState):
-    """The router's classification of the user's query."""
+    """扩展输入状态，供多工具子图在运行时使用。
+
+    Attributes:
+        steps: 步骤或检索轨迹列表，供 Agent 引用中间结果。
+        question: 与子图交互用的当前问题文本。
+        answer: 与子图交互用的回答文本。
+    """
+
     steps: list[str] = field(default_factory=list)
-    """Populated by the retriever. This is a list of documents that the agent can reference."""
-    question: str = field(default_factory=str) # 这个参数用来与子图进行交互
-    answer: str = field(default_factory=str)  # 这个参数用来与子图进行交互
+    question: str = field(default_factory=str)  # 与子图交互
+    answer: str = field(default_factory=str)  # 与子图交互
 
-
+# 使用 LangGraph 构建多工具 Agent 工作流
 def create_multi_tool_workflow(
     llm: BaseChatModel,
     graph: Neo4jGraph,
@@ -80,40 +92,26 @@ def create_multi_tool_workflow(
     attempt_cypher_execution_on_final_attempt: bool = False,
     default_to_text2cypher: bool = True,
 ) -> CompiledStateGraph:
-    """
-    Create a multi tool Agent workflow using LangGraph.
-    This workflow allows an agent to select from various tools to complete each identified task.
+    """使用 LangGraph 构建多工具 Agent 工作流。
 
-    Parameters
-    ----------
-    llm : BaseChatModel
-        The LLM to use for processing
-    graph : Neo4jGraph
-        The Neo4j graph wrapper.
-    tool_schemas : List[BaseModel]
-        A list of Pydantic class defining the available tools.
-    predefined_cypher_dict : Dict[str, str]
-        A Python dictionary of Cypher query names as keys and Cypher queries as values.
-    scope_description: Optional[str], optional
-        A short description of the application scope, by default None
-    cypher_example_retriever: BaseCypherExampleRetriever
-        The retriever used to collect Cypher examples for few shot prompting.
-    llm_cypher_validation : bool, optional
-        Whether to perform LLM validation with the provided LLM, by default True
-    max_attempts: int, optional
-        The max number of allowed attempts to generate valid Cypher, by default 3
-    attempt_cypher_execution_on_final_attempt, bool, optional
-        THIS MAY BE DANGEROUS.
-        Whether to attempt Cypher execution on the last attempt, regardless of if the Cypher contains errors, by default False
-    default_to_text2cypher : bool, optional
-        Whether to attempt Text2Cypher if no tool calls are returned by the LLM, by default True
-    initial_state: Optional[InputState], optional
-        An initial state passed from parent graph, by default None
+    工作流允许 Agent 根据规划结果在多种工具（Cypher、预定义查询、GraphRAG、Text2SQL 等）间选择，
+    经汇总后生成最终回答。
 
-    Returns
-    -------
-    CompiledStateGraph
-        The workflow.
+    Args:
+        llm: 用于推理与工具选择的聊天模型。
+        graph: Neo4j 图数据库封装。
+        tool_schemas: 可用工具的 Pydantic 模型类列表。
+        predefined_cypher_dict: 预定义 Cypher 名称到查询语句的映射。
+        cypher_example_retriever: 用于 few-shot 的 Cypher 示例检索器。
+        scope_description: 应用业务范围简述，供护栏判断；默认 None。
+        llm_cypher_validation: 是否用 LLM 校验生成的 Cypher；默认 True。
+        max_attempts: 生成合法 Cypher 的最大尝试次数；默认 3。
+        attempt_cypher_execution_on_final_attempt: 是否在最后一次尝试时仍执行 Cypher（**存在风险**，
+            即使语句可能仍有误）；默认 False。
+        default_to_text2cypher: 当 LLM 未返回工具调用时是否回退到 Text2Cypher；默认 True。
+
+    Returns:
+        已编译的状态图，可直接调用执行。
     """
     # 1. 创建guardrails节点
     # Guardrails 节点决定传入的问题是否在检索的范围内（比如是否和电商（自家的产品相关））。如果不在，则提供默认消息，并且工作流路由到最终的答案生成。
@@ -185,12 +183,16 @@ kb_logger = get_logger(service="kb-multi-tool")
 
 
 class KBGuardrailsDecision(BaseModel):
+    """知识库护栏的结构化判定：继续处理或结束，并可附带摘要与理由。"""
+
     decision: Literal["proceed", "end"]
     summary: Optional[str] = None
     rationale: Optional[str] = None
 
 
 class KBRouteDecision(BaseModel):
+    """知识库路由的结构化输出：检索路径（本地/外部/混合）及要调用的工具列表。"""
+
     route: Literal["local", "external", "hybrid"]
     rationale: str
     tools: List[Literal["milvus", "postgres"]] = Field(
@@ -199,11 +201,15 @@ class KBRouteDecision(BaseModel):
 
 
 class KBInputState(TypedDict):
+    """知识库工作流入口状态：用户问题与对话历史。"""
+
     question: str
     history: List[Dict[str, str]]
 
 
 class KBWorkflowState(TypedDict):
+    """知识库工作流运行时的完整状态（护栏、路由、各源检索结果与最终回答等）。"""
+
     question: str
     history: List[Dict[str, str]]
     guardrails_decision: str
@@ -220,29 +226,43 @@ class KBWorkflowState(TypedDict):
 
 
 class KBOutputState(TypedDict):
+    """知识库工作流对外输出：回答、执行步骤与引用来源。"""
+
     answer: str
     steps: List[str]
     sources: List[str]
 
-
+# 构建面向知识库查询的多工具 LangGraph 工作流
 def create_kb_multi_tool_workflow(
     llm: BaseChatModel,
     knowledge_service: Optional[KnowledgeService] = None,
     *,
     top_k: Optional[int] = None,
-    similarity_threshold: Optional[float] = None,
+    similarity_threshold: Optional[float] = None, # 相似度阈值
     filter_expr: Optional[str] = None,
-    allow_external: Optional[bool] = None,
-    external_search_url: Optional[str] = None,
-    external_search_timeout: Optional[float] = None,
-    scope_description: Optional[str] = None,
+    allow_external: Optional[bool] = None, # 是否允许外部检索
+    external_search_url: Optional[str] = None, # 外部检索URL
+    external_search_timeout: Optional[float] = None, # 外部检索超时时间
+    scope_description: Optional[str] = None, # 业务范围说明，覆盖默认护栏文案时使用。
 ) -> CompiledStateGraph:
-    """
-    Create a multi-tool workflow for knowledge base queries.
+    """构建面向知识库查询的多工具 LangGraph 工作流。
 
-    This workflow performs guardrails checking, routes the question to the most
-    appropriate retrieval source (local vector store, external API, or both),
-    and then synthesises a response with safety-aware instructions.
+    依次执行：安全护栏判定、按问题路由到合适的检索源（本地 PostgreSQL / Milvus、外部 API 或混合），
+    最后基于检索上下文与安全约束合成简体中文回答。
+
+    Args:
+        llm: 用于护栏判定、路由与最终生成的聊天模型。
+        knowledge_service: 知识检索服务；默认新建 ``KnowledgeService`` 实例。
+        top_k: 各源返回条数上限；默认取配置 ``KB_TOP_K``。
+        similarity_threshold: 相似度阈值（主要用于外部检索等）；默认取配置。
+        filter_expr: 传给 Milvus 检索的过滤表达式。
+        allow_external: 是否允许外部检索；默认取配置 ``KB_ENABLE_EXTERNAL_SEARCH``。
+        external_search_url: 外部检索 HTTP 端点；默认取配置 ``KB_EXTERNAL_SEARCH_URL``。
+        external_search_timeout: 外部请求超时（秒）；默认取配置。
+        scope_description: 业务范围说明，覆盖默认护栏文案时使用。
+
+    Returns:
+        已编译的知识库状态图。
     """
 
     knowledge_service = knowledge_service or KnowledgeService()
@@ -390,6 +410,8 @@ def create_kb_multi_tool_workflow(
     )
 
     def _history_to_text(history: List[Dict[str, str]], limit: int = 4) -> str:
+        """将最近若干轮对话历史格式化为多行文本，供路由提示词使用。"""
+
         if not history:
             return "（无历史对话）"
         segments: List[str] = []
@@ -410,6 +432,8 @@ def create_kb_multi_tool_workflow(
         default_label: str,
         empty_hint: str,
     ) -> str:
+        """将检索文档列表格式化为带编号、来源的上下文字符串（单条内容截断）。"""
+
         if not results:
             return empty_hint
         snippets: List[str] = []
@@ -434,6 +458,8 @@ def create_kb_multi_tool_workflow(
         return "\n\n".join(snippets)
 
     def _format_milvus_results(results: List[Dict[str, Any]]) -> str:
+        """格式化 Milvus 向量检索结果供最终提示词使用。"""
+
         return _format_results(
             results,
             default_label="Milvus",
@@ -441,6 +467,8 @@ def create_kb_multi_tool_workflow(
         )
 
     def _format_postgres_results(results: List[Dict[str, Any]]) -> str:
+        """格式化 PostgreSQL 结构化检索结果供最终提示词使用。"""
+
         return _format_results(
             results,
             default_label="PostgreSQL",
@@ -448,6 +476,8 @@ def create_kb_multi_tool_workflow(
         )
 
     def _format_combined_local_results(results: List[Dict[str, Any]]) -> str:
+        """格式化合并后的本地检索结果（默认标签为「本地」）。"""
+
         return _format_results(
             results,
             default_label="本地",
@@ -455,6 +485,8 @@ def create_kb_multi_tool_workflow(
         )
 
     def _format_external_results(results: List[Dict[str, Any]]) -> str:
+        """格式化外部检索 API 返回的结果列表。"""
+
         if not results:
             return "（无外部检索结果）"
         snippets: List[str] = []
@@ -480,6 +512,8 @@ def create_kb_multi_tool_workflow(
     def _collect_sources(
         *result_sets: List[Dict[str, Any]],
     ) -> List[str]:
+        """从多组检索结果中提取来源字段，去重并保持顺序。"""
+
         collected: List[str] = []
         for dataset in result_sets:
             for doc in dataset or []:
@@ -502,8 +536,11 @@ def create_kb_multi_tool_workflow(
         for source in collected:
             seen.setdefault(source, None)
         return list(seen.keys())
-
+    
+    # 知识库护栏节点：判定问题是否在业务范围内，并写入决策与摘要。
     async def guardrails(state: KBWorkflowState) -> Dict[str, Any]:
+        """知识库护栏节点：判定问题是否在业务范围内，并写入决策与摘要。"""
+
         question = state.get("question", "")
         decision = await guardrails_chain.ainvoke({"question": question})
         summary = decision.summary or (
@@ -517,8 +554,11 @@ def create_kb_multi_tool_workflow(
             "summary": summary,
             "steps": ["guardrails"],
         }
-
+    
+    # 路由节点：根据问题与历史选择 local/external/hybrid 及 postgres/milvus 工具组合。
     async def router(state: KBWorkflowState) -> Dict[str, Any]:
+        """路由节点：根据问题与历史选择 local/external/hybrid 及 postgres/milvus 工具组合。"""
+
         question = state.get("question", "")
         history_text = _history_to_text(state.get("history", []))
         decision = await router_chain.ainvoke(
@@ -550,15 +590,16 @@ def create_kb_multi_tool_workflow(
             "kb_tools": tools,
             "steps": ["router"],
         }
-
+    
+    # 本地检索节点：优先 PostgreSQL pgvector，无结果时再使用 Milvus 兜底。
     async def local_search(state: KBWorkflowState) -> Dict[str, Any]:
-        """
-        优先使用 PostgreSQL pgvector 结构化查询，如果无结果再用 Milvus 兜底。
+        """本地检索节点：优先 PostgreSQL pgvector，无结果时再使用 Milvus 兜底。
 
-        执行策略：
-        1. 优先查询 PostgreSQL（如果在工具列表中）
-        2. 如果 PostgreSQL 有结果（>= 1条），直接使用，跳过 Milvus
-        3. 如果 PostgreSQL 无结果或未被选择，查询 Milvus 作为兜底
+        策略说明：
+            1. 若工具列表包含 postgres，优先请求摄取服务的结构化检索。
+            2. 若 PostgreSQL 返回至少一条有效结果，则不再查询 Milvus。
+            3. 若无 postgres 结果或未选 postgres，则在需要时对 Milvus 做向量检索。
+            4. 本地无结果且允许外部检索时，可将 route 调整为 external 以便后续外链路处理。
         """
         question = state.get("question", "")
         if not question.strip():
@@ -718,7 +759,10 @@ def create_kb_multi_tool_workflow(
             "steps": ["local_search"],
         }
 
+    # 外部检索节点：在启用且配置 URL 时 POST 查询，写入 external_results。
     async def external_search(state: KBWorkflowState) -> Dict[str, Any]:
+        """外部检索节点：在启用且配置 URL 时 POST 查询，写入 external_results。"""
+
         if not (allow_external_search and external_url):
             return {"external_results": [], "steps": ["external_search"]}
 
@@ -769,7 +813,10 @@ def create_kb_multi_tool_workflow(
             "steps": ["external_search"],
         }
 
+    # 终局节点：护栏拒绝则直接返回摘要；否则拼接各源上下文并调用 LLM 生成回答与来源列表。
     async def finalize(state: KBWorkflowState) -> KBOutputState:
+        """终局节点：护栏拒绝则直接返回摘要；否则拼接各源上下文并调用 LLM 生成回答与来源列表。"""
+
         if state.get("guardrails_decision") == "end":
             summary = state.get("summary") or "抱歉，该问题暂时无法回答。"
             return {"answer": summary, "sources": [], "steps": ["finalize"]}
@@ -822,12 +869,18 @@ def create_kb_multi_tool_workflow(
         }
 
     def guardrails_router(state: KBWorkflowState) -> str:
+        """护栏后的条件边：结束则直达 finalize，否则进入路由节点。"""
+
         return "finalize" if state.get("guardrails_decision") == "end" else "kb_router"
 
     def router_edge(state: KBWorkflowState) -> str:
+        """路由后的条件边：纯外部路径走 external_search，否则走本地检索。"""
+
         return "external_search" if state.get("route") == "external" else "local_search"
 
     def local_edge(state: KBWorkflowState) -> str:
+        """本地检索后的条件边：hybrid/external 且允许外部时补查外部，否则进入 finalize。"""
+
         route = state.get("route", "local")
         if route in {"hybrid", "external"} and allow_external_search and external_url:
             return "external_search"
