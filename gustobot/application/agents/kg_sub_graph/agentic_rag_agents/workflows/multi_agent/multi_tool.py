@@ -149,8 +149,8 @@ def create_multi_tool_workflow(
     main_graph_builder.add_node(planner) #决定下一步要用的工具/路径。
     main_graph_builder.add_node("cypher_query", cypher_query)#命名 "cypher_query" 的节点，执行 cypher_query 函数（通常是对图数据库生成/执行 Cypher）。
     main_graph_builder.add_node(predefined_cypher) #预设查询（当无需动态生成时）。
-    main_graph_builder.add_node("customer_tools", customer_tools) #lightrag_query
-    main_graph_builder.add_node("text2sql_query", text2sql_query)
+    main_graph_builder.add_node("customer_tools", customer_tools) #lightrag_query工具节点
+    main_graph_builder.add_node("text2sql_query", text2sql_query) #text2sql_query工具节点
     main_graph_builder.add_node(summarize) # 总结
     main_graph_builder.add_node(tool_selection) #工具选择的中间控制节点（通常结合 planner 的输出）。
     main_graph_builder.add_node(final_answer)
