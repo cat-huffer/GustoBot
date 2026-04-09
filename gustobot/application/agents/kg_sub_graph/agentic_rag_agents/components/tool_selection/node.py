@@ -1,9 +1,14 @@
 """
-Tool selection node for orchestrating recipe knowledge graph tools.
+工具选择节点：为当前子任务决定用哪一个下游工具。
 
-This node inspects an incoming question, asks the LLM to pick an appropriate tool
-(template-based Cypher, text-to-Cypher, or customer-specific tools), and routes
-execution accordingly.
+流程概览：
+1. 规则捷径——含「口味/营养/功效」等描述向关键词时优先走 GraphRAG（customer_tools）；
+   问句像 SQL 且路由为 text2sql-query 时直接走 Text2SQL。
+2. 否则用「提示词 + LLM.bind_tools + PydanticToolsParser(first_tool_only)」
+   在 tool_schemas（如 cypher_query、predefined_cypher、microsoft_graphrag_query、text2sql_query）中选一个。
+3. LLM 未选出工具时，默认回退到 cypher_query（Text2Cypher）。
+
+输出为 LangGraph 的 Command，通过 Send 跳转到对应工具节点。
 """
 
 from typing import Any, Callable, Coroutine, Dict, List, Literal, Set
@@ -68,6 +73,7 @@ DESCRIPTIVE_KEYWORDS = [
 
 
 def _looks_like_sql_question(question: str) -> bool:
+    """根据英文 SQL 片段或中英文统计类关键词，粗略判断是否在问结构化统计。"""
     normalized = question.lower()
     if SQL_PATTERN.search(normalized):
         return True
@@ -75,6 +81,7 @@ def _looks_like_sql_question(question: str) -> bool:
 
 
 def _make_command(target: str, payload: Dict[str, Any]) -> Command[Any]:
+    """封装跳转到命名节点 target，并附带子任务 payload。"""
     return Command(goto=Send(target, payload))
 
 
@@ -84,7 +91,10 @@ def create_tool_selection_node(
     default_to_text2cypher: bool = True,
 ) -> Callable[[ToolSelectionInputState], Coroutine[Any, Any, Command[Any]]]:
     """
-    Create the LangGraph node that decides which tool to invoke for a given task.
+    构造工具选择 LangGraph 节点。
+
+    使用传入的 ``tool_schemas`` 绑定为 LLM 可调工具列表；节点每次调用返回应执行的
+    下一跳（cypher_query / predefined_cypher / customer_tools / text2sql_query 等）。
     """
 
     tool_selection_chain: Runnable[Dict[str, Any], Any] = (
@@ -102,7 +112,9 @@ def create_tool_selection_node(
         state: ToolSelectionInputState,
     ) -> Command[Literal["cypher_query", "predefined_cypher", "customer_tools", "text2sql_query"]]:
         """
-        Choose the appropriate tool for the given task.
+        根据 ``state["question"]`` 与 ``state["context"]``（如 route_type）选择工具并路由。
+
+        命中规则捷径则不经 LLM；否则解析 LLM 的 tool call，映射到具体图节点名。
         """
 
         question_text = state.get("question", "")

@@ -64,84 +64,84 @@ class RecipeCypherRetriever(BaseCypherExampleRetriever):
                     "cypher": """MATCH (n:Dish {name: '宫保鸡丁'})-[:USES_METHOD]->(m:CookingMethod) RETURN collect(m.name) AS 工艺"""
                 }
             ],
-            "property_constraint": [  # 基于属性的约束查询
-                {
-                    "question": "有哪些炒菜？",
-                    "cypher": """MATCH (dish:Dish)
-MATCH (dish)-[:USES_METHOD]->(rel_0:CookingMethod {name: '炒'})
-RETURN dish.name AS name LIMIT 15"""
-                },
-                {
-                    "question": "麻辣口味的菜有哪些？",
-                    "cypher": """MATCH (dish:Dish)
-MATCH (dish)-[:HAS_FLAVOR]->(rel_0:Flavor {name: '麻辣'})
-RETURN dish.name AS name LIMIT 15"""
-                },
-                {
-                    "question": "热菜类型的菜品",
-                    "cypher": """MATCH (dish:Dish)
-MATCH (dish)-[:BELONGS_TO_TYPE]->(rel_0:DishType {name: '热菜'})
-RETURN dish.name AS name LIMIT 15"""
-                }
-            ],
-            "relationship_constraint": [  # 关系约束查询
-                {
-                    "question": "五花肉可以做什么菜？",
-                    "cypher": """MATCH (dish:Dish)-[rel:HAS_MAIN_INGREDIENT]->(ingredient:Ingredient {name: '五花肉'})
-RETURN type(rel) AS relation, dish.name AS name LIMIT 15"""
-                },
-                {
-                    "question": "用鸡蛋做的菜有哪些？",
-                    "cypher": """MATCH (dish:Dish)-[rel:HAS_AUX_INGREDIENT]->(ingredient:Ingredient {name: '鸡蛋'})
-RETURN type(rel) AS relation, dish.name AS name LIMIT 15"""
-                },
-                {
-                    "question": "红烧肉需要哪些食材？",
-                    "cypher": """MATCH (dish:Dish {name: '红烧肉'})-[rel:HAS_MAIN_INGREDIENT]->(ingredient:Ingredient)
-RETURN type(rel) AS relation, ingredient.name AS name"""
-                }
-            ],
-            "relationship_query": [  # 关系用量查询
-                {
-                    "question": "红烧肉需要多少五花肉？",
-                    "cypher": """MATCH (dish:Dish {name: '红烧肉'})-[rel:HAS_MAIN_INGREDIENT]->(ingredient:Ingredient {name: '五花肉'})
-RETURN rel.amount_text AS amount_text"""
-                },
-                {
-                    "question": "宫保鸡丁的鸡胸肉用量",
-                    "cypher": """MATCH (dish:Dish {name: '宫保鸡丁'})-[rel:HAS_MAIN_INGREDIENT]->(ingredient:Ingredient {name: '鸡胸肉'})
-RETURN rel.amount_text AS amount_text"""
-                }
-            ]
+                        "property_constraint": [  # 基于属性的约束查询
+                            {
+                                "question": "有哪些炒菜？",
+                                "cypher": """MATCH (dish:Dish)
+            MATCH (dish)-[:USES_METHOD]->(rel_0:CookingMethod {name: '炒'})
+            RETURN dish.name AS name LIMIT 15"""
+                            },
+                            {
+                                "question": "麻辣口味的菜有哪些？",
+                                "cypher": """MATCH (dish:Dish)
+            MATCH (dish)-[:HAS_FLAVOR]->(rel_0:Flavor {name: '麻辣'})
+            RETURN dish.name AS name LIMIT 15"""
+                            },
+                            {
+                                "question": "热菜类型的菜品",
+                                "cypher": """MATCH (dish:Dish)
+            MATCH (dish)-[:BELONGS_TO_TYPE]->(rel_0:DishType {name: '热菜'})
+            RETURN dish.name AS name LIMIT 15"""
+                            }
+                        ],
+                        "relationship_constraint": [  # 关系约束查询
+                            {
+                                "question": "五花肉可以做什么菜？",
+                                "cypher": """MATCH (dish:Dish)-[rel:HAS_MAIN_INGREDIENT]->(ingredient:Ingredient {name: '五花肉'})
+            RETURN type(rel) AS relation, dish.name AS name LIMIT 15"""
+                            },
+                            {
+                                "question": "用鸡蛋做的菜有哪些？",
+                                "cypher": """MATCH (dish:Dish)-[rel:HAS_AUX_INGREDIENT]->(ingredient:Ingredient {name: '鸡蛋'})
+            RETURN type(rel) AS relation, dish.name AS name LIMIT 15"""
+                            },
+                            {
+                                "question": "红烧肉需要哪些食材？",
+                                "cypher": """MATCH (dish:Dish {name: '红烧肉'})-[rel:HAS_MAIN_INGREDIENT]->(ingredient:Ingredient)
+            RETURN type(rel) AS relation, ingredient.name AS name"""
+                            }
+                        ],
+                        "relationship_query": [  # 关系用量查询
+                            {
+                                "question": "红烧肉需要多少五花肉？",
+                                "cypher": """MATCH (dish:Dish {name: '红烧肉'})-[rel:HAS_MAIN_INGREDIENT]->(ingredient:Ingredient {name: '五花肉'})
+            RETURN rel.amount_text AS amount_text"""
+                            },
+                            {
+                                "question": "宫保鸡丁的鸡胸肉用量",
+                                "cypher": """MATCH (dish:Dish {name: '宫保鸡丁'})-[rel:HAS_MAIN_INGREDIENT]->(ingredient:Ingredient {name: '鸡胸肉'})
+            RETURN rel.amount_text AS amount_text"""
+                            }
+                        ]
         }
 
         # 通用补充示例（提供更多样化的查询模式）
         general_examples = [
             {
-                "question": "红烧肉的完整烹饪步骤",
-                "cypher": """MATCH (d:Dish {name: '红烧肉'})-[r:HAS_STEP]->(s:CookingStep)
-RETURN s.order AS 步骤序号, s.instruction AS 步骤说明
-ORDER BY s.order"""
-            },
-            {
-                "question": "五花肉的营养价值和功效",
-                "cypher": """MATCH (i:Ingredient {name: '五花肉'})
-OPTIONAL MATCH (i)-[:HAS_NUTRITION_PROFILE]->(n:NutritionProfile)
-OPTIONAL MATCH (i)-[:HAS_HEALTH_BENEFIT]->(h:HealthBenefit)
-RETURN i.name, n.description AS 营养, COLLECT(h.name) AS 功效"""
-            },
-            {
-                "question": "麻辣口味的炒菜有哪些？",
-                "cypher": """MATCH (d:Dish)-[:HAS_FLAVOR]->(f:Flavor {name: '麻辣'}),
-      (d)-[:USES_METHOD]->(m:CookingMethod {name: '炒'})
-RETURN d.name AS 菜名 LIMIT 10"""
-            },
-            {
-                "question": "最常用的烹饪方法",
-                "cypher": """MATCH (d:Dish)-[:USES_METHOD]->(m:CookingMethod)
-WITH m.name AS 方法, COUNT(d) AS 使用次数
-RETURN 方法, 使用次数
-ORDER BY 使用次数 DESC LIMIT 5"""
+                            "question": "红烧肉的完整烹饪步骤",
+                            "cypher": """MATCH (d:Dish {name: '红烧肉'})-[r:HAS_STEP]->(s:CookingStep)
+            RETURN s.order AS 步骤序号, s.instruction AS 步骤说明
+            ORDER BY s.order"""
+                        },
+                        {
+                            "question": "五花肉的营养价值和功效",
+                            "cypher": """MATCH (i:Ingredient {name: '五花肉'})
+            OPTIONAL MATCH (i)-[:HAS_NUTRITION_PROFILE]->(n:NutritionProfile)
+            OPTIONAL MATCH (i)-[:HAS_HEALTH_BENEFIT]->(h:HealthBenefit)
+            RETURN i.name, n.description AS 营养, COLLECT(h.name) AS 功效"""
+                        },
+                        {
+                            "question": "麻辣口味的炒菜有哪些？",
+                            "cypher": """MATCH (d:Dish)-[:HAS_FLAVOR]->(f:Flavor {name: '麻辣'}),
+                (d)-[:USES_METHOD]->(m:CookingMethod {name: '炒'})
+            RETURN d.name AS 菜名 LIMIT 10"""
+                        },
+                        {
+                            "question": "最常用的烹饪方法",
+                            "cypher": """MATCH (d:Dish)-[:USES_METHOD]->(m:CookingMethod)
+            WITH m.name AS 方法, COUNT(d) AS 使用次数
+            RETURN 方法, 使用次数
+            ORDER BY 使用次数 DESC LIMIT 5"""
             }
         ]
 
