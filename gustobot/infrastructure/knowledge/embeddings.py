@@ -56,11 +56,12 @@ class OpenAICompatibleEmbeddings:
             client_kwargs["base_url"] = base_url
 
         try:
+            # 底层 OpenAI 客户端。用来发 HTTP 请求、调 API 的程序对象
             self._client = OpenAI(**client_kwargs)
         except ValueError as exc:
-            # Some environments set ALL_PROXY to an unsupported scheme like `socks://...`,
-            # which makes httpx (and therefore the OpenAI client) crash at import-time.
-            # Fall back to a client that ignores env proxies to keep the KB functional.
+            # 部分环境将 ALL_PROXY 设为 httpx 不支持的协议（例如 socks://...），
+            # 会导致 httpx（以及基于它的 OpenAI 客户端）在构造时崩溃。
+            # 回退为忽略环境变量代理的客户端，避免知识库完全不可用。
             if "Unknown scheme for proxy URL" in str(exc):
                 logger.warning("Invalid proxy env detected; disabling trust_env for OpenAI client: %s", exc)
                 self._client = OpenAI(**client_kwargs, http_client=httpx.Client(trust_env=False))

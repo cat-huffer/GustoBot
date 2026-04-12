@@ -1,7 +1,11 @@
 """
-Crawler CLI entrypoint.
+爬虫命令行入口：从外部数据源取数，映射为菜谱 JSON，可选 POST 至知识库批量接口。
 
-Docs reference:
+当前子命令 ``wikipedia``：经 MediaWiki API 取维基**导语摘要**（非整页 HTML），用于联调/演示检索。
+实际入库依赖已启动的后端与 Embedding/Milvus 配置，详见 ``docs/爬虫与批量导入指南.md``。
+
+示例：
+
   python -m gustobot.crawler.cli wikipedia --query "川菜" --import-kb --limit 10
 """
 
@@ -22,6 +26,7 @@ def _post_recipes_batch(
     recipes: List[Dict[str, Any]],
     timeout: float,
 ) -> Dict[str, Any]:
+    """调用 ``POST .../recipes/batch`` 写入一批菜谱，返回解析后的 JSON 响应。"""
     url = api_base_url.rstrip("/") + "/api/v1/knowledge/recipes/batch"
     with httpx.Client(timeout=timeout, trust_env=False) as client:
         response = client.post(url, json=recipes)
@@ -30,27 +35,35 @@ def _post_recipes_batch(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m gustobot.crawler.cli")
+    """构建带子命令的解析器（当前仅 ``wikipedia``）。"""
+    parser = argparse.ArgumentParser(
+        prog="python -m gustobot.crawler.cli",
+        description="外部数据抓取并导入知识库，或仅输出/落盘 JSON（不连后端）。",
+    )
     subparsers = parser.add_subparsers(dest="source", required=True)
 
-    wikipedia = subparsers.add_parser("wikipedia", help="Import Wikipedia page extracts")
-    wikipedia.add_argument("--query", required=True, help="Search query")
-    wikipedia.add_argument("--limit", type=int, default=10, help="Number of pages to fetch")
-    wikipedia.add_argument("--lang", default="zh", help="Wikipedia language (default: zh)")
-    wikipedia.add_argument("--import-kb", action="store_true", help="Insert into KB via API")
+    wikipedia = subparsers.add_parser(
+        "wikipedia",
+        help="按关键词搜索维基并取页面摘要，映射为菜谱形数据",
+    )
+    wikipedia.add_argument("--query", required=True, help="搜索关键词")
+    wikipedia.add_argument("--limit", type=int, default=10, help="最多抓取页面条数")
+    wikipedia.add_argument("--lang", default="zh", help="语言子域，如 zh → zh.wikipedia.org（默认：zh）")
+    wikipedia.add_argument("--import-kb", action="store_true", help="通过 HTTP 批量接口写入知识库")
     wikipedia.add_argument(
         "--api-base-url",
         default="http://localhost:8000",
-        help="Backend base URL (default: http://localhost:8000)",
+        help="后端根 URL（默认：http://localhost:8000）",
     )
-    wikipedia.add_argument("--timeout", type=float, default=30.0, help="HTTP timeout seconds")
-    wikipedia.add_argument("--output", default=None, help="Write harvested pages as JSON to file")
-    wikipedia.add_argument("--dry-run", action="store_true", help="Do not POST, only print/emit JSON")
+    wikipedia.add_argument("--timeout", type=float, default=30.0, help="HTTP 超时（秒）")
+    wikipedia.add_argument("--output", default=None, help="将原始页面列表写入该 JSON 路径")
+    wikipedia.add_argument("--dry-run", action="store_true", help="不 POST，仅打印转换后的菜谱 JSON")
 
     return parser
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    """解析参数：拉取维基 → 转菜谱列表 → dry-run/仅输出 或 调用批量接口导入。"""
     parser = _build_parser()
     args = parser.parse_args(argv)
 

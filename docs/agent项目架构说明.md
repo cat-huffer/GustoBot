@@ -23,7 +23,7 @@
 - 路径均以包根 **`gustobot/`** 为起点（写作时省略该前缀）。
 - **`__init__.py`**：未单独展开时，表示「包标识 + 导出子模块/`__all__`」；若下文写了具体导出内容，以该节为准。
 - 下列 **「文件概述」** 按仓库当前实现归纳；个别空文件标注为占位。
-- 下节 **目录树** 展示文件夹嵌套关系；**不含** `__pycache__`。更细的「每个文件一句话」仍见后文各章表格。
+- 下节 **目录树** 展示文件夹嵌套关系；**不含** `__pycache__`。树中每行末尾 **`# …`** 为该**目录或文件**的简短职责概括；更细的「每个文件一句话」仍见后文各章表格。
 
 ---
 
@@ -32,193 +32,193 @@
 ### 包根 `gustobot/`
 
 ```
-gustobot/
-├── __init__.py
-├── main.py                          # FastAPI 入口
-├── config/                          # 全局配置
-├── domain/                          # 领域模型
-│   └── models/
-├── interfaces/                      # HTTP 接口层
-│   └── http/
-│       ├── knowledge_router.py
-│       ├── lightrag_router.py
-│       ├── models/                  # API Pydantic 模型
-│       └── v1/                      # 版本化 REST：chat / sessions / upload
-├── application/                     # 应用与智能体
-│   ├── prompts/
-│   ├── services/                    # LightRAG、LLM、Redis、搜索服务
-│   └── agents/                      # 见下「agents」子树
-├── infrastructure/                  # 日志、DB、知识、持久化、工具
-│   ├── core/
-│   ├── knowledge/
-│   │   └── recipe_kg/               # 菜谱图谱问答；含 dicts/ 词典文件
-│   ├── persistence/
-│   │   ├── db/models/
-│   │   └── crud/
-│   └── tools/
-└── crawler/                         # 离线爬虫
+gustobot/                              # Python 包根：后端业务与智能体主代码
+├── __init__.py                        # 包元数据、版本号导出
+├── main.py                            # FastAPI 入口：挂载路由、启动与建表
+├── config/                            # 全局配置（环境变量 → settings）
+├── domain/                            # 领域层：与框架无关的核心概念
+│   └── models/                        # 领域模型定义（占位/扩展）
+├── interfaces/                        # 接口适配层：对外 HTTP 契约
+│   └── http/                          # REST 路由、v1 API、请求响应模型
+│       ├── knowledge_router.py        # 菜谱批量导入、图谱问答等知识相关路由
+│       ├── lightrag_router.py         # LightRAG 查询等独立路由
+│       ├── models/                    # API 层 Pydantic 模型（chat/session 等）
+│       └── v1/                        # 版本化 REST：对话、会话、上传
+├── application/                       # 应用层：编排、服务、智能体图
+│   ├── prompts/                       # 应用级提示词片段（如搜索）
+│   ├── services/                      # LightRAG 单例、LLM、Redis、搜索编排
+│   └── agents/                        # LangGraph 主图、子图、工具节点（见下）
+├── infrastructure/                    # 基础设施：日志、存储、向量、工具实现
+│   ├── core/                          # 日志、DB 引擎、中间件、安全、哈希
+│   ├── knowledge/                     # Milvus、Embedding、知识服务、菜谱导入
+│   │   └── recipe_kg/                 # 菜谱 Neo4j 问答管线；dicts/ 词典资源
+│   ├── persistence/                   # 关系库持久化
+│   │   ├── db/models/                 # SQLAlchemy ORM 表模型
+│   │   └── crud/                      # 会话、消息、历史等 CRUD
+│   └── tools/                         # 供 Agent 绑定的工具定义与搜索实现
+└── crawler/                           # 离线爬虫：维基等 → JSON，非在线主链路
 ```
 
 ### `interfaces/http/`（API 层，逐文件展开）
 
 ```
-interfaces/http/
-├── __init__.py
-├── knowledge_router.py
-├── lightrag_router.py
-├── models/
-│   ├── __init__.py
-│   ├── chat.py
-│   ├── chat_session.py
-│   ├── chat_message.py
-│   ├── chat_history.py
-│   └── user.py
-└── v1/
-    ├── __init__.py
-    ├── chat.py
-    ├── sessions.py
-    └── upload.py
+interfaces/http/                       # 对外 HTTP：知识路由 + v1 业务 API
+├── __init__.py                        # 子包导出
+├── knowledge_router.py                # 知识库/图谱相关端点
+├── lightrag_router.py                 # LightRAG 相关端点
+├── models/                            # 请求体/响应体 Pydantic 模型
+│   ├── __init__.py                    # 模型聚合导出
+│   ├── chat.py                        # 对话请求与流式等模型
+│   ├── chat_session.py                # 会话 API 模型
+│   ├── chat_message.py                # 单条消息 API 模型
+│   ├── chat_history.py                # 历史记录 API 模型
+│   └── user.py                        # 用户 API 模型
+└── v1/                                # /api/v1 下子路由聚合
+    ├── __init__.py                    # 注册 api_router
+    ├── chat.py                        # 主对话、流式输出
+    ├── sessions.py                    # 会话 CRUD 类端点
+    └── upload.py                      # 文件上传
 ```
 
 ### `application/`（除 agents 外）
 
 ```
-application/
-├── __init__.py
-├── prompts/
+application/                         # 应用层（不含 agents 时的公共部分）
+├── __init__.py                        # 应用包导出
+├── prompts/                           # 非 Agent 专有的提示词模板
 │   ├── __init__.py
-│   └── search_prompts.py
-└── services/
+│   └── search_prompts.py              # 搜索/联网检索类提示
+└── services/                          # 可注入业务服务（供 main、路由、Agent 用）
     ├── __init__.py
-    ├── lightrag_service.py
-    ├── llm_client.py
-    ├── redis_cache.py
-    └── search_service.py
+    ├── lightrag_service.py            # LightRAG 生命周期与全局 getter
+    ├── llm_client.py                  # 统一 LLM 调用封装
+    ├── redis_cache.py                 # Redis 读写封装
+    └── search_service.py              # 搜索业务编排
 ```
 
 ### `application/agents/`（智能体根）
 
 ```
-application/agents/
-├── __init__.py
-├── lg_builder.py                    # 主 LangGraph 装配（总入口）
-├── lg_prompts.py
-├── lg_states.py
-├── utils.py
-├── main.py                          # CLI 调试入口
-├── kb_tools/
+application/agents/                    # 智能体：主图、KB 工具、Text2SQL、图谱子图
+├── __init__.py                        # agents 包导出
+├── lg_builder.py                      # 主 LangGraph 装配（聊天总入口）
+├── lg_prompts.py                      # 主流程系统提示与大段说明
+├── lg_states.py                       # 主图 State / InputState
+├── utils.py                           # Agent 侧通用辅助（消息、ID 等）
+├── main.py                            # 本地 CLI：加载 graph、MemorySaver 调试
+├── kb_tools/                          # Milvus 向量检索节点与提示
 │   ├── __init__.py
-│   ├── node.py
-│   └── prompts.py
-├── text2sql/                        # 独立 Text2SQL 图；`components/*` 多为对 agentic 实现的再导出
+│   ├── node.py                        # KB 检索 LangGraph 节点
+│   └── prompts.py                     # KB 节点提示词
+├── text2sql/                          # 独立 Text2SQL 状态图（节点多来自 agentic 再导出）
 │   ├── __init__.py
-│   ├── workflow.py
-│   ├── state.py
-│   ├── models.py
-│   ├── utils.py
-│   └── components/
-│       ├── __init__.py
-│       ├── schema_retrieval/
+│   ├── workflow.py                    # Schema→分析→生成→校验→执行→可视化→格式化
+│   ├── state.py                       # Text2SQL 状态类型
+│   ├── models.py                      # Text2SQL 数据结构
+│   ├── utils.py                       # Text2SQL 辅助函数
+│   └── components/                    # 各步节点工厂（转发 agentic 实现）
+│       ├── __init__.py                # Re-export 各 create_*_node
+│       ├── schema_retrieval/          # 拉表结构
 │       │   ├── __init__.py
 │       │   └── node.py
-│       ├── sql_generation/
+│       ├── sql_generation/            # LLM 生成 SQL
 │       │   ├── __init__.py
 │       │   ├── node.py
 │       │   └── prompts.py
-│       ├── sql_validation/
+│       ├── sql_validation/            # 语法与安全校验
 │       │   ├── __init__.py
 │       │   ├── node.py
 │       │   └── validators.py
-│       └── sql_execution/
+│       └── sql_execution/             # 执行 SQL 并收结果
 │           ├── __init__.py
 │           └── node.py
-└── kg_sub_graph/
+└── kg_sub_graph/                      # 知识图谱子图：Neo4j、工具 schema、多工具编排入口
     ├── __init__.py
-    ├── kg_neo4j_conn.py
-    ├── kg_tools_list.py
-    ├── kg_states.py
-    ├── kg_builder.py                # 可能为空；装配以 lg_builder + agentic 为准
-    ├── multi_tools.py
-    ├── prompts/
+    ├── kg_neo4j_conn.py               # Neo4j 驱动 / LangChain Graph
+    ├── kg_tools_list.py               # bind_tools 用 Pydantic 工具定义
+    ├── kg_states.py                   # 子图专用状态
+    ├── kg_builder.py                  # 子图构建占位（可能为空）
+    ├── multi_tools.py                 # create_multi_tool_workflow 等薄封装
+    ├── prompts/                       # 子图系统提示与 Schema 文本工具
     │   ├── __init__.py
     │   ├── kg_prompts.py
     │   └── schema_utils.py
-    ├── planner/
+    ├── planner/                       # 与菜谱子图配合的规划节点
     │   ├── __init__.py
     │   └── planner_node.py
-    ├── ps_genai_agents/
+    ├── ps_genai_agents/               # 历史 ps_genai 风格护栏提示残留
     │   ├── __init__.py
     │   └── components/
     │       ├── __init__.py
     │       └── guardrails/
     │           ├── __init__.py
     │           └── prompts.py
-    └── agentic_rag_agents/          # 见下「最深」子树
+    └── agentic_rag_agents/            # 图谱多工具 LangGraph 核心（见下）
 ```
 
 ### `agentic_rag_agents/`（图谱多工具子图，嵌套最深）
 
 ```
-agentic_rag_agents/
+agentic_rag_agents/                    # 图谱多工具子图：工作流 + 节点 + 检索 + 示例入库
 ├── __init__.py
-├── agent.py                         # LangGraph Studio 调试
-├── agent_cooking_assistant.py
-├── constants.py
-├── exceptions.py
-├── utils/
+├── agent.py                           # LangGraph Studio / 外部工作流调试入口
+├── agent_cooking_assistant.py         # 菜谱场景多工具装配示例
+├── constants.py                       # 子图常量
+├── exceptions.py                      # 子图自定义异常
+├── utils/                             # 子图配置与杂项
 │   ├── __init__.py
-│   └── config.py
-├── embeddings/
+│   └── config.py                      # 可读开关与参数
+├── embeddings/                        # 嵌入协议（供检索器）
 │   ├── __init__.py
 │   └── embedder_protocol.py
-├── retrievers/
+├── retrievers/                        # Few-shot / 向量检索 Cypher 示例
 │   ├── __init__.py
 │   └── cypher_examples/
 │       ├── __init__.py
-│       ├── base.py
-│       ├── recipe_retriever.py
-│       ├── dynamic_schema_retriever.py
+│       ├── base.py                    # 检索器抽象
+│       ├── recipe_retriever.py        # 菜谱场景示例检索
+│       ├── dynamic_schema_retriever.py # 动态 Schema 感知检索
 │       └── vector_store/
 │           ├── __init__.py
-│           └── neo4j_vector_example_retriever.py
-├── ingest/
+│           └── neo4j_vector_example_retriever.py  # Neo4j 向量索引检索示例
+├── ingest/                            # 将 Cypher 示例写入 Neo4j
 │   ├── __init__.py
 │   └── cypher_examples/
 │       ├── __init__.py
-│       ├── models.py
-│       ├── utils.py
-│       └── ingest_neo4j.py
-├── workflows/
+│       ├── models.py                  # 导入数据结构
+│       ├── utils.py                   # 导入辅助
+│       └── ingest_neo4j.py            # 实际写入与索引
+├── workflows/                         # 可编译 LangGraph 流水线定义
 │   ├── __init__.py
-│   ├── multi_agent/
+│   ├── multi_agent/                   # 多工具主路径（Map-Reduce、Send 等）
 │   │   ├── __init__.py
-│   │   ├── multi_tool.py            # 主多工具图 ★
-│   │   ├── edges.py
-│   │   ├── text2cypher_with_viz_and_follow_ups.py
-│   │   ├── text2cypher.py           # 可能为空（占位）
+│   │   ├── multi_tool.py              # 主多工具图 ★（护栏→规划→选工具→各工具→汇总→终答）
+│   │   ├── edges.py                   # 条件边、Send、Command 路由
+│   │   ├── text2cypher_with_viz_and_follow_ups.py  # 可视化 + 追问变体
+│   │   ├── text2cypher.py             # 占位或历史（以 multi_tool 为准）
 │   │   └── text2cypher_with_visualization.py
-│   └── single_agent/
+│   └── single_agent/                  # 单智能体 Text2Cypher / 可视化
 │       ├── __init__.py
 │       ├── text2cypher.py
 │       └── visualization.py
-├── ui/
+├── ui/                                # 演示用 Streamlit/UI 组件（非生产 API）
 │   ├── __init__.py
 │   └── components/
 │       ├── __init__.py
-│       ├── chat.py
-│       └── sidebar.py
-└── components/                      # 根上另有 __init__.py；子目录多为 __init__.py + node.py（± prompts/models），详表见后文
+│       ├── chat.py                    # 聊天 UI
+│       └── sidebar.py                 # 侧边栏
+└── components/                        # 多工具图各节点实现（多为 node + prompts）
     ├── __init__.py
-    ├── state.py
-    ├── models.py
-    ├── guardrails/
-    ├── planner/
-    ├── tool_selection/
-    ├── cypher_tools/
-    ├── predefined_cypher/           # cypher_dict、descriptions、node、utils
-    ├── text2cypher/                 # generation / validation / correction / execution
-    │   └── validation/utils/        # cypher_extractors、regex、utils
-    ├── text2sql/                    # 与独立 text2sql 共用实现
+    ├── state.py                       # OverallState 等共享状态
+    ├── models.py                      # 跨节点 Pydantic 模型
+    ├── guardrails/                    # 入口护栏
+    ├── planner/                       # 子任务规划
+    ├── tool_selection/                # 模型选工具 + Send 分发
+    ├── cypher_tools/                  # Text2Cypher 整条链封装为「一工具」
+    ├── predefined_cypher/             # 模板名 → 固定 Cypher（cypher_dict 等）
+    ├── text2cypher/                   # 生成 / 校验 / 纠错 / 执行 子步骤
+    │   └── validation/utils/          # 抽取 Cypher、正则等
+    ├── text2sql/                      # 子图内 Text2SQL 全链路（与 application/text2sql 共用）
     │   ├── domain_knowledge.py
     │   ├── schema_retrieval/
     │   ├── query_analysis/
@@ -227,69 +227,69 @@ agentic_rag_agents/
     │   ├── sql_execution/
     │   ├── visualization/
     │   └── formatting/
-    ├── customer_tools/              # LightRAG
-    ├── gather_cypher/
-    ├── gather_visualizations/
-    ├── summarize/
-    ├── final_answer/
-    ├── validate_final_answer/
-    ├── visualize/                   # generate_chart、generate_details、validate、correct_details
-    ├── errors/tool_selection/
-    └── utils/                       # regex_patterns、utils
+    ├── customer_tools/                # LightRAG 客户工具节点
+    ├── gather_cypher/                 # 多路 Cypher 结果聚合
+    ├── gather_visualizations/         # 多路可视化配置聚合
+    ├── summarize/                     # 子任务结果中间汇总
+    ├── final_answer/                  # 面向用户的终答生成
+    ├── validate_final_answer/         # 终答质量检查（若启用）
+    ├── visualize/                     # 图表与细节生成、校验、纠错
+    ├── errors/tool_selection/         # 选工具失败分支
+    └── utils/                         # 组件层正则与通用小函数
 ```
 
 ### `infrastructure/knowledge/recipe_kg/`（含词典资源）
 
 ```
-infrastructure/knowledge/recipe_kg/
+infrastructure/knowledge/recipe_kg/    # 菜谱 Neo4j 问答：解析→意图→查图→答（供 knowledge_router 等）
 ├── __init__.py
-├── neo4j_qa_service.py
-├── qa_pipeline_orchestrator.py
-├── query_parser_service.py
-├── question_intent_classifier.py
-├── answer_search_engine.py
-├── graph_database_client.py
-├── graph_importer_service.py
-├── graph_cache_loader.py
-├── recipe_json_parser.py
-├── fuzzy_matcher.py
-└── dicts/                           # 文本词典（意图/实体等，供解析或匹配）
-    ├── caixi.txt
-    ├── deny.txt
-    ├── gongyi.txt
-    ├── haoshi.txt
-    ├── kouwei.txt
-    ├── leixing.txt
-    ├── material.txt
-    ├── recipe.txt
-    └── yongliang.txt
+├── neo4j_qa_service.py                # 对外服务封装（HTTP 层调用）
+├── qa_pipeline_orchestrator.py        # 整条 QA 管线编排
+├── query_parser_service.py            # 自然语言 → 结构化查询条件
+├── question_intent_classifier.py      # 问题意图分类
+├── answer_search_engine.py            # 图/索引上检索候选答案
+├── graph_database_client.py           # Neo4j 访问封装
+├── graph_importer_service.py          # 图谱数据导入
+├── graph_cache_loader.py              # 图或缓存加载
+├── recipe_json_parser.py              # 菜谱 JSON → 图侧结构
+├── fuzzy_matcher.py                   # 菜名/实体模糊匹配
+└── dicts/                             # 纯文本词表（菜系、口味、食材等）
+    ├── caixi.txt                      # 菜系
+    ├── deny.txt                       # 否定/排除词
+    ├── gongyi.txt                     # 工艺
+    ├── haoshi.txt                     # 耗时
+    ├── kouwei.txt                     # 口味
+    ├── leixing.txt                    # 类型
+    ├── material.txt                   # 食材
+    ├── recipe.txt                     # 菜名/别名
+    └── yongliang.txt                  # 用量
 ```
 
 ### `infrastructure/` 其余（与树对应）
 
 ```
-infrastructure/
+infrastructure/                        # 横切能力：日志、库、向量、CRUD、工具
 ├── __init__.py
-├── core/
+├── core/                              # 应用基础设施（与业务弱耦合）
 │   ├── __init__.py
-│   ├── logger.py
-│   ├── database.py
-│   ├── hashing.py
-│   ├── middleware.py
-│   └── security.py
-├── knowledge/
+│   ├── logger.py                      # Loguru 配置与 get_logger
+│   ├── database.py                    # SQLAlchemy 引擎、Session、建表
+│   ├── hashing.py                     # 哈希工具
+│   ├── middleware.py                  # FastAPI 中间件
+│   └── security.py                    # 安全相关工具
+├── knowledge/                         # 向量库、Embedding、重排、菜谱 KG
 │   ├── __init__.py
-│   ├── embeddings.py
-│   ├── vector_store.py
-│   ├── reranker.py
-│   ├── knowledge_service.py
-│   ├── recipe_import.py
-│   └── recipe_kg/                 # 见上一节完整树（含 dicts/*.txt）
-├── persistence/
+│   ├── embeddings.py                  # OpenAI 兼容 Embedding 客户端
+│   ├── vector_store.py                # Milvus 封装
+│   ├── reranker.py                    # 重排序 API
+│   ├── knowledge_service.py           # 切块、入库、检索编排
+│   ├── recipe_import.py               # 批量导入 JSON → 菜谱结构
+│   └── recipe_kg/                     # 见上一节（Neo4j QA + dicts）
+├── persistence/                       # 关系型数据：模型 + CRUD
 │   ├── __init__.py
-│   ├── db/
+│   ├── db/                            # ORM 层
 │   │   ├── __init__.py
-│   │   └── models/
+│   │   └── models/                    # 表映射
 │   │       ├── __init__.py
 │   │       ├── user.py
 │   │       ├── chat_session.py
@@ -297,35 +297,35 @@ infrastructure/
 │   │       ├── chat_history.py
 │   │       ├── conversation.py
 │   │       └── message.py
-│   └── crud/
+│   └── crud/                          # 数据访问封装
 │       ├── __init__.py
-│       ├── base.py
+│       ├── base.py                    # 通用 CRUD 基类
 │       ├── chat_history.py
 │       ├── conversation.py
 │       ├── crud_chat_message.py
 │       └── crud_chat_session.py
-└── tools/
+└── tools/                             # Agent 可用工具实现与定义
     ├── __init__.py
-    ├── definitions.py
-    └── search.py
+    ├── definitions.py                 # 工具 Schema / 常量
+    └── search.py                      # 联网搜索等
 ```
 
 ### `config/`、`domain/`、`crawler/`（浅层，与表格一致）
 
 ```
-config/
+config/                                # Pydantic Settings：集中读环境变量
 ├── __init__.py
-└── settings.py
+└── settings.py                        # LLM、Milvus、Neo4j、DB URL 等
 
-domain/
+domain/                                # 领域层（当前较薄，可扩展实体）
 ├── __init__.py
 └── models/
-    └── __init__.py
+    └── __init__.py                    # 领域模型包占位
 
-crawler/
+crawler/                               # 离线：维基摘要 → 菜谱 JSON → 可选 POST 后端
 ├── __init__.py
-├── cli.py
-└── wikipedia.py
+├── cli.py                             # argparse 子命令入口
+└── wikipedia.py                       # MediaWiki API 与映射逻辑
 ```
 
 **阅读方式**：上面各 **目录树** 负责「嵌套到哪一层、文件夹之间什么关系」；后面各章 **表格** 负责「每个文件具体干什么」。`agentic_rag_agents/components/` 下子目录多、文件模式重复（多为 `__init__.py` + `node.py` ± `prompts.py`），树中已折叠，**逐文件说明请看文档后半对应小节**。
@@ -335,86 +335,86 @@ crawler/
 其余 `components/*` 子目录结构类似，可按此对照；**每一文件的职责仍以表格为准**。
 
 ```
-components/text2cypher/
-├── __init__.py
-├── models.py
-├── schema.py
-├── state.py
-├── text2sql_tool.py
-├── generation/
+components/text2cypher/                # 自然语言 → Cypher：生成→校验→纠错→执行
+├── __init__.py                        # 导出各步节点工厂
+├── models.py                          # 内部数据结构
+├── schema.py                          # 图 Schema 片段类型
+├── state.py                           # 本子图状态机状态
+├── text2sql_tool.py                   # 包装独立 Text2SQL 子图为工具
+├── generation/                        # LLM 写 Cypher
+│   ├── __init__.py                    # 导出生成节点
+│   ├── node.py                        # 生成节点实现
+│   └── prompts.py                     # 生成阶段提示
+├── validation/                        # 语法/规则校验与抽取
 │   ├── __init__.py
-│   ├── node.py
-│   └── prompts.py
-├── validation/
-│   ├── __init__.py
-│   ├── node.py
-│   ├── models.py
-│   ├── prompts.py
-│   ├── validators.py
+│   ├── node.py                        # 校验决策与重试
+│   ├── models.py                      # 校验结构化输出
+│   ├── prompts.py                     # LLM 校验提示
+│   ├── validators.py                  # 规则/语法实现
 │   └── utils/
 │       ├── __init__.py
-│       ├── cypher_extractors.py
-│       ├── regex_patterns.py
-│       └── utils.py
-├── correction/
+│       ├── cypher_extractors.py       # 从模型输出抠出 Cypher
+│       ├── regex_patterns.py          # Cypher 相关正则
+│       └── utils.py                   # 其它校验辅助
+├── correction/                        # 失败时 LLM 修正 Cypher
 │   ├── __init__.py
-│   ├── node.py
-│   └── prompts.py
-└── execution/
+│   ├── node.py                        # 纠错节点
+│   └── prompts.py                     # 纠错提示
+└── execution/                         # Neo4j 执行并收集结果
     ├── __init__.py
-    └── node.py
+    └── node.py                        # 执行节点
 
-components/text2sql/
-├── __init__.py
-├── domain_knowledge.py
-├── schema_retrieval/
+components/text2sql/                   # 自然语言 → SQL：与 application/text2sql 共用
+├── __init__.py                        # 导出全部节点工厂
+├── domain_knowledge.py                # 业务域补充，辅助 SQL
+├── schema_retrieval/                  # INFORMATION_SCHEMA 拉表结构
 │   ├── __init__.py
-│   └── node.py
-├── query_analysis/
+│   └── node.py                        # Schema 检索节点
+├── query_analysis/                    # 意图与实体解析
 │   ├── __init__.py
-│   ├── node.py
+│   ├── node.py                        # 分析节点
 │   └── prompts.py
-├── sql_generation/
+├── sql_generation/                    # LLM 生成 SQL
 │   ├── __init__.py
-│   ├── node.py
+│   ├── node.py                        # SQL 生成节点
 │   └── prompts.py
-├── sql_validation/
+├── sql_validation/                    # 校验与重试计数
 │   ├── __init__.py
-│   ├── node.py
-│   └── validators.py
-├── sql_execution/
+│   ├── node.py                        # 校验节点
+│   └── validators.py                  # 方言语法检查等
+├── sql_execution/                     # 执行查询、限行
 │   ├── __init__.py
-│   └── node.py
-├── visualization/
+│   └── node.py                        # 执行节点
+├── visualization/                     # 结果可视化建议
 │   ├── __init__.py
-│   ├── node.py
+│   ├── node.py                        # 可视化建议节点
 │   └── prompts.py
-└── formatting/
+└── formatting/                        # 自然语言答案格式化
     ├── __init__.py
-    └── node.py
+    └── node.py                        # 格式化节点
 ```
 
 ```
-components/visualize/
-├── __init__.py
-├── state.py
-├── models.py
-├── schema.py
-├── generate_chart/
+components/visualize/                  # Cypher 结果 → 图表与文字细节（生成/校验/纠错）
+├── __init__.py                        # 子包导出
+├── state.py                           # 可视化流水线状态
+├── models.py                          # 图表与细节模型
+├── schema.py                          # 可视化 schema
+├── generate_chart/                    # 生成图表规格或数据
 │   ├── __init__.py
-│   ├── node.py
-│   └── charts.py
-├── generate_details/
+│   ├── node.py                        # 图表生成节点
+│   └── charts.py                      # 各图表类型构造
+├── generate_details/                  # 生成数据细节描述
 │   ├── __init__.py
-│   ├── node.py
+│   ├── node.py                        # 细节生成节点
 │   ├── models.py
 │   └── prompts.py
-├── validate_details/
+├── validate_details/                  # 校验细节合法性
 │   ├── __init__.py
-│   └── node.py
-└── correct_details/
+│   └── node.py                        # 细节校验节点
+└── correct_details/                   # LLM 修正细节
     ├── __init__.py
-    ├── node.py
+    ├── node.py                        # 细节纠错节点
     └── prompts.py
 ```
 

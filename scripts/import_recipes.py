@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Batch import recipes into the KB via the HTTP API.
+通过 HTTP 接口批量将菜谱导入知识库。
 
-Example:
+示例：
   python scripts/import_recipes.py --file data/recipe.json --batch-size 100
 """
 
@@ -29,9 +29,11 @@ def _iter_payloads_from_json(
     limit: Optional[int] = None,
 ) -> Iterator[Dict[str, Any]]:
     """
-    Yield KB recipe payloads from either:
-    - dict keyed by recipe name (bundled data/recipe.json format)
-    - list of recipe dicts (already-normalized)
+    从 JSON 根对象迭代产出知识库可用的菜谱字典。
+
+    支持：
+    - 以菜名为键、菜谱子对象为值的字典（与仓库内 data/recipe.json 风格一致）
+    - 菜谱字典组成的列表（已接近 API 字段或含「主食材/辅料/做法」等中文键时做映射）
     """
 
     emitted = 0
@@ -75,6 +77,7 @@ def _iter_payloads_from_json(
 
 
 def _chunked(iterable: Iterable[Dict[str, Any]], size: int) -> Iterator[List[Dict[str, Any]]]:
+    """将可迭代对象按固定条数切成批次。"""
     batch: List[Dict[str, Any]] = []
     for item in iterable:
         batch.append(item)
@@ -91,6 +94,7 @@ def _post_batch(
     api_base_url: str,
     recipes: List[Dict[str, Any]],
 ) -> Tuple[int, Dict[str, Any]]:
+    """POST 一批菜谱到批量接口，返回成功写入条数与响应 JSON。"""
     url = api_base_url.rstrip("/") + "/api/v1/knowledge/recipes/batch"
     response = client.post(url, json=recipes)
     response.raise_for_status()
@@ -100,17 +104,18 @@ def _post_batch(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Batch import recipes into KB")
-    parser.add_argument("--file", required=True, help="Path to recipe JSON file")
-    parser.add_argument("--batch-size", type=int, default=100, help="Recipes per request")
+    """解析命令行参数，执行 dry-run 或分批 POST 导入。"""
+    parser = argparse.ArgumentParser(description="通过 HTTP 批量将菜谱导入知识库")
+    parser.add_argument("--file", required=True, help="菜谱 JSON 文件路径")
+    parser.add_argument("--batch-size", type=int, default=100, help="每请求包含的菜谱条数")
     parser.add_argument(
         "--api-base-url",
         default="http://localhost:8000",
-        help="Backend base URL (default: http://localhost:8000)",
+        help="后端根 URL（默认：http://localhost:8000）",
     )
-    parser.add_argument("--limit", type=int, default=None, help="Only import first N recipes")
-    parser.add_argument("--dry-run", action="store_true", help="Convert only, do not POST")
-    parser.add_argument("--timeout", type=float, default=60.0, help="HTTP timeout seconds")
+    parser.add_argument("--limit", type=int, default=None, help="仅导入前 N 条菜谱")
+    parser.add_argument("--dry-run", action="store_true", help="仅转换并打印样例，不发起 POST")
+    parser.add_argument("--timeout", type=float, default=60.0, help="HTTP 超时（秒）")
     args = parser.parse_args(argv)
 
     json_path = Path(args.file)

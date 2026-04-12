@@ -1,10 +1,12 @@
 """
-Wikipedia crawler using the public MediaWiki API.
+维基百科数据源：通过公开 MediaWiki HTTP API 完成「搜索标题 → 拉取导语级纯文本与规范 URL」。
 
-Design goals:
-- Small surface area (used by CLI + tests)
-- No hard dependency on the backend server; ingestion happens via HTTP API client in CLI
-- Network calls are isolated so mapping can be unit-tested offline
+**职责**：仅网络请求与结构化字段；**不**直连向量库。入库由 ``gustobot.crawler.cli`` 调后端
+``/api/v1/knowledge/recipes/batch`` 完成。
+
+**可测性**：``wikipedia_page_to_recipe`` 纯映射，可在不联网下单测；搜索/抓取函数与 httpx 耦合。
+
+**网络**：请求使用 ``trust_env=False``（默认不走系统代理），与项目批量导入文档说明一致。
 """
 
 
@@ -15,9 +17,10 @@ import httpx
 
 def wikipedia_page_to_recipe(page: Dict[str, Any], *, query: Optional[str] = None) -> Dict[str, Any]:
     """
-    Convert a Wikipedia page summary into a recipe-like payload accepted by the KB API.
+    将单条维基页面（title / extract / fullurl）转为知识库 API 可接受的菜谱形字典。
 
-    We store the extract as a single "step" so it remains searchable/retrievable in the recipe KB.
+    ``extract`` 整段作为 ``steps`` 单列，便于向量化检索；``tips`` 附来源链接；``ingredients`` 一般为
+    ``None``。适用于联调与演示，**非**标准烹饪步骤数据。
     """
 
     title = (page.get("title") or page.get("name") or "").strip()
@@ -43,6 +46,7 @@ def wikipedia_page_to_recipe(page: Dict[str, Any], *, query: Optional[str] = Non
 
 
 def _api_url(lang: str) -> str:
+    """返回 ``https://{lang}.wikipedia.org/w/api.php``。"""
     return f"https://{lang}.wikipedia.org/w/api.php"
 
 
@@ -53,7 +57,11 @@ def search_wikipedia_titles(
     lang: str = "zh",
     timeout: float = 20.0,
 ) -> List[str]:
-    """Return a list of Wikipedia page titles matching the query."""
+    """
+    调用 ``list=search``，返回与关键词匹配的页面标题列表。
+
+    ``srlimit`` 受 ``limit`` 与 API 上限（约 50）共同约束；空查询返回空列表。
+    """
 
     if not query or not query.strip():
         return []
@@ -83,9 +91,10 @@ def fetch_wikipedia_pages(
     timeout: float = 20.0,
 ) -> List[Dict[str, Any]]:
     """
-    Fetch Wikipedia page intro extracts for a search query.
+    对搜索关键词：先取标题列表，再一次性请求 ``prop=extracts|info`` 拉取导语与 ``fullurl``。
 
-    Returns items with keys: title, extract, fullurl
+    返回字典列表，每项含 ``title``、``extract``、``fullurl``；顺序与搜索命中顺序一致（便于 CLI 稳定输出）。
+    无命中时返回空列表。
     """
 
     titles = search_wikipedia_titles(query, limit=limit, lang=lang, timeout=timeout)
