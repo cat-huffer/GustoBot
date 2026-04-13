@@ -230,6 +230,13 @@
 
 这里「检索」的对象常是 **与当前问题相似的 Cypher 示例**（及图 Schema），而不是用户上传的文档块。生成的是 **Cypher** → **Neo4j 执行** → 结果进入 **summarize / final_answer**。
 
+可以把它理解为「**两段生成**」：
+
+1. **生成查询语句**：LLM 基于 few-shot + schema 生成 Cypher。  
+2. **生成自然语言答案**：LLM 基于 Neo4j 执行结果总结回答。  
+
+因此，Text2Cypher 的核心不是「文档命中率」，而是「**Cypher 可执行性 + 执行结果可解释性**」。
+
 ### 4.2 Few-shot 检索（示例）
 
 `create_text2cypher_generation_node` 在生成前调用 retriever：
@@ -253,9 +260,38 @@
 
 **检索器契约**：均继承 `BaseCypherExampleRetriever`，实现 `get_examples(query, k) -> str`，供生成节点注入 `fewshot_examples` 占位符。
 
+### 4.2.1 Text2Cypher 全流程（从问题到答案）
+
+从工程角度，推荐按下面顺序理解日志与状态：
+
+1. **问题入图谱子图**：路由进入 `cypher_query` 或相邻分支。  
+2. **检索 few-shot**：`get_examples(query, k)` 取与当前问题最接近的示例对。  
+3. **拼装生成输入**：`question + fewshot_examples + schema` 交给生成链。  
+4. **Cypher 校验与执行**：执行节点在 Neo4j 获取结果行（这是最终证据主来源）。  
+5. **总结与终答**：`summarize` / `final_answer` 将结果行转为用户可读答案。  
+
+> 直观判断：如果你看到 few-shot 正常，但答案仍差，优先检查 **Cypher 是否执行到了正确子图与属性**，而不是先调 Milvus 阈值。
+
+### 4.2.2 「检索对象」与「证据对象」分别是什么？
+
+这条链里有两个常被混淆的概念：
+
+- **检索对象（generation aid）**：few-shot 示例、schema 元数据。  
+- **证据对象（answer evidence）**：Neo4j 执行返回的结果行。  
+
+所以它属于广义 RAG：先检索辅助信息，再通过工具执行拿证据，再生成答案。
+
 ### 4.3 与 LightRAG / Milvus 的边界
 
 - **Neo4j 菜谱图**：实体与关系由 Cypher 查询；**LightRAG** 使用独立工作目录与另一套索引；**Milvus 菜谱集合** 服务 L1 `kb-query` 与主图 KB 节点。三者数据不自动同步，讨论「检索不到」时要先分清库。
+
+### 4.3.1 Text2Cypher 常见误区（排查优先级）
+
+1. **误把它当 Milvus 文档检索调参**：这条链不依赖 Milvus 文档块召回。  
+2. **few-shot 语料与当前 schema 脱节**：示例过旧会导致生成不存在的标签/属性。  
+3. **只看最终答案，不看执行 Cypher**：应优先确认执行语句与返回行。  
+4. **把执行失败当“检索为空”**：两者定位不同，前者通常是语句或连接问题。  
+5. **忽略工具选择节点**：问题可能被 `predefined_cypher` / `text2sql_query` 分流，不一定进入 Text2Cypher 生成链。
 
 ### 4.4 `predefined_cypher`：TF-IDF 上的「查询模板 RAG」
 
@@ -428,6 +464,21 @@ flowchart LR
 
 LightRAG 既可 **独立通过 REST 调用**，也在主智能体图谱多工具流程中作为 **`customer_tools` 节点**（`components/customer_tools/node.py`，内部封装 LightRAG API）。整体架构见 [agent项目架构说明.md](agent项目架构说明.md)。
 
+### 10.0 一句话先懂 LightRAG
+
+LightRAG 不是「Neo4j 的别名」也不是「Milvus 的另一接口」，而是**独立索引体系**：在 `LIGHTRAG_WORKING_DIR` 维护自己的文档块、向量与图结构文件，查询时按 `mode` 做混合检索，再交给 LLM 组织答案。
+
+### 10.0.1 LightRAG 的“检索-生成”拆解
+
+可以用同一框架看它：
+
+1. **检索输入**：用户 query + mode（`naive/local/global/hybrid/...`）。  
+2. **检索对象**：`working_dir` 内的 chunk/entity/relationship 索引与图文件。  
+3. **上下文组织**：LightRAG 内部按模式融合局部图、全局图与语义候选。  
+4. **生成输出**：LLM 根据融合上下文输出自然语言答案。  
+
+这说明它和 Text2Cypher 的关键差异是：LightRAG 通常不先生成可执行 Cypher，而是直接在其本地索引层完成证据召回与组织。
+
 ### 10.1 架构概要
 
 #### 构建期（常见：Docker 镜像构建）
@@ -468,6 +519,14 @@ LightRAG 既可 **独立通过 REST 调用**，也在主智能体图谱多工具
 | mix / bypass | 依 LightRAG 版本与内部语义而定 | 进阶或特殊路径；调用前建议对照官方文档 |
 
 **调试接口** `POST /api/v1/lightrag/test-modes` 当前仅对 **`naive`、`local`、`global`、`hybrid`** 四种做循环对比，不包含 `mix`/`bypass`。
+
+### 10.2.1 模式选择建议（实战）
+
+- 先用 **`hybrid`** 建立基线：作为默认最稳，便于和其他模式做 AB。  
+- 问题偏「实体细节」时试 **`local`**：例如某道菜、某个食材关联问题。  
+- 问题偏「总体概括」时试 **`global`**：例如菜系分布、整体趋势。  
+- 需要最低延迟或快速验证时可先 **`naive`**：效果不足再切回 `hybrid`。  
+- 任何模式对比都建议固定 `top_k` 与同一 query 集，避免把参数扰动误判成模式差异。
 
 ### 10.3 HTTP API 一览
 
@@ -627,6 +686,13 @@ EMBEDDING_DIMENSION=1536
 | 数据形态 | 文档块 + 向量 + 图文件 | 实体与关系 | 向量块 + 标量元数据 |
 | 典型入口 | `/api/v1/lightrag/*`、`customer_tools` | 图谱多工具、Cypher | `/api/v1/knowledge/*`、`kb-query` / `kb_tools` |
 | 更新 | `insert` 增量 | 图谱导入 / Cypher | 批量 `/recipes/batch` 等 |
+
+### 10.8.1 最常见边界误解
+
+1. **“Neo4j 有数据，LightRAG 一定能答”**：不成立；LightRAG 要看自己的 `working_dir` 索引。  
+2. **“Milvus 命中高，LightRAG 也应同样命中”**：不成立；两者嵌入、索引结构、召回策略都可能不同。  
+3. **“主聊天里调用了 `customer_tools`，就等于直接调 `/lightrag/query`”**：不完全等价；主图可能有额外路由、上下文拼接与回答约束。  
+4. **“LightRAG 没结果=模型不行”**：先查索引文件完整性、维度一致性、请求模式与 `top_k`，再评估模型。
 
 ### 10.9 最佳实践（简）
 
