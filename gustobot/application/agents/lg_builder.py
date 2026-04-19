@@ -1,19 +1,10 @@
-"""菜谱助手主 LangGraph：意图路由、多分支应答与知识/图谱/文件/图片能力编排。
+"""菜谱助手主 LangGraph（``StateGraph(AgentState, input=InputState)``）。
 
-``StateGraph(AgentState, input=InputState)`` 从 ``START`` 进入 ``analyze_and_route_query``，
-经 ``route_query`` 条件边分发到一般问答、补充信息、图谱多工具、图片、文件或向量知识库等节点。
-编译结果导出为模块级 ``graph``（带 ``MemorySaver`` 检查点），供 ``main`` 或 API 层
-``astream`` / ``ainvoke``。
+``START`` → ``analyze_and_route_query`` → ``route_query`` 条件边分发至一般问答、补充信息、图谱、图片、文件、向量检索等节点；编译为模块级 ``graph``（``MemorySaver``），供 ``astream`` / ``ainvoke``，``thread_id`` 在同进程内持久会话。
 
-依赖 ``lg_prompts`` 中的系统提示、``lg_states`` 中的状态类型，以及 Neo4j / Milvus 等配置；
-各节点函数签名统一为 ``(state, *, config)``，返回对 ``AgentState`` 的部分更新字典。
-"""
+主图状态由 ``messages`` 与检查点承载；知识库子图将 ``messages[:-1]`` 编为 history，供子图路由 LLM 读近期对话（与主图同源，非独立向量记忆库）。
 
-
-
-"""
-主图里用 messages +（可选）MemorySaver/thread_id 持久在同进程会话里；
-进入知识库子图时，把 messages[:-1] 编成 history，主要用于路由 LLM 看最近对话，而不是单独一套向量记忆库
+依赖 ``lg_prompts``、``lg_states`` 与 Neo4j / Milvus。节点签名为 ``(state, *, config)``，返回 ``AgentState`` 的部分更新。
 """
 
 from gustobot.application.agents.lg_prompts import (
@@ -898,21 +889,10 @@ async def create_kb_query(
 async def create_research_plan(
         state: AgentState, *, config: RunnableConfig
 ) -> Dict[str, List[str] | str]:
-    """图谱 / 结构化问数：``graphrag-query`` 与 ``text2sql-query`` 共用入口。
+    """主图「图谱 / 结构化问数」：构建并执行 ``create_multi_tool_workflow``（图查询、GraphRAG、Text2SQL 等）。
 
-    组装 ``create_multi_tool_workflow``：Neo4j、Cypher 示例检索、预定义模板、GraphRAG、
-    Text2SQL 等工具 schema，将用户问题与工作流输出的 ``answer`` 封装为单条 ``AIMessage``。
-    ``input_state["route_type"]`` 来自当前 ``Router.type``，供子图区分策略。
-
-    Args:
-        state: 含 ``messages`` 与 ``router``。
-        config: 保留统一签名。
-
-    Returns:
-        形如 ``{"messages": [AIMessage(content=answer)]}``。
-
-    Raises:
-        RuntimeError: 未配置 ``OPENAI_API_KEY`` 时。
+    末条用户消息 → ``question``；``route_type`` 由 ``_ensure_router(getattr(state, "router", None))`` 得到；
+    ``data`` / ``history`` 为空。Neo4j 连不上时 ``graph`` 为 ``None`` 并记日志。
     """
     logger.info("------execute local knowledge base query------")
 

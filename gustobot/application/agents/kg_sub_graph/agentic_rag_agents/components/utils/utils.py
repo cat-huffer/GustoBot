@@ -213,7 +213,7 @@ def _format_recipe_schema_from_docs() -> str:
 
     return "\n".join(summary_lines).strip()
 
-
+# 用于获取图表结构，并将其转换为可用的格式，以便于大模型理解
 def retrieve_and_parse_schema_from_graph_for_prompts(graph: Neo4jGraph) -> str:
     """
     Retrieve the runtime schema, clean it for prompt usage, and enrich

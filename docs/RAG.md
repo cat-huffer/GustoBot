@@ -718,7 +718,7 @@ EMBEDDING_DIMENSION=1536
 | [Neo4j库.md](Neo4j库.md) | Neo4j HTTP `/graph/qa`、与 Milvus 同路由不同库、`recipe_kg` |
 | [智能体路由速查.md](智能体路由速查.md) | L1/L2 分支入口 |
 | [提示词工程.md](提示词工程.md) | 路由与 KB/图谱提示词、占位符 |
-| [agent项目架构说明.md](agent项目架构说明.md) | 包目录与 agent 文件位置 |
+| [agent项目架构说明.md](agent项目架构说明.md) | 项目目录与 agent 文件位置 |
 | [agent开发项目总览.md](agent开发项目总览.md) | RAG/工具/记忆等能力总览 |
 | [Text2SQL实现说明.md](Text2SQL实现说明.md) | 问数链路与提示 |
 | [环境变量与配置说明.md](环境变量与配置说明.md) | LLM、Embedding、检索相关配置 |

@@ -72,23 +72,23 @@ def create_knowledge_query_node(
     knowledge_service: Optional[KnowledgeService] = None,
     llm_client: Optional[LLMClient] = None,
 ) -> Callable[[KnowledgeQueryInputState], Coroutine[Any, Any, KnowledgeQueryOutputState]]:
-    """
-    Build a LangGraph node that queries the recipe knowledge base and crafts an answer.
-    """
+    """构造知识库查询节点：向量检索（可选联网）、拼上下文、LLM 生成或降级为原文。"""
 
     knowledge_service = knowledge_service or KnowledgeService()
 
-    # Lazily construct a client only if API key is present.
+    # 仅在有 API Key 时实例化 LLM，避免无密钥环境报错。
+    # 自建
     llm_client = llm_client or (
         LLMClient() if settings.OPENAI_API_KEY else None
     )
 
     async def knowledge_query(state: KnowledgeQueryInputState) -> KnowledgeQueryOutputState:
+        """执行单次检索与回答组装，写入 steps 中的 knowledge_query 步骤。"""
         question = state.get("task") or ""
         context = state.get("context") or {}
         prior_steps = list(state.get("steps", []))
 
-        if not question:
+        if not question:  # 无 task 时直接返回占位
             logger.warning("Knowledge node invoked without a question payload.")
             return KnowledgeQueryOutputState(
                 answer=FALLBACK_MESSAGE,
@@ -103,7 +103,7 @@ def create_knowledge_query_node(
         similarity_threshold = context.get("similarity_threshold")
         filter_expr = context.get("filter_expr")
 
-        try:
+        try:  # 向量检索
             documents = await knowledge_service.search(
                 query=question,
                 top_k=top_k,
@@ -133,7 +133,7 @@ def create_knowledge_query_node(
             )
 
         web_results: List[Dict[str, Any]] = []
-        if settings.KB_ENABLE_EXTERNAL_SEARCH:
+        if settings.KB_ENABLE_EXTERNAL_SEARCH:  # 可选联网，失败不影响主流程
             try:
                 search_tool = SearchTool()
                 web_top_k = context.get("web_top_k")
@@ -172,6 +172,7 @@ def create_knowledge_query_node(
 
         system_prompt = build_knowledge_system_prompt(context_snippet)
 
+        # 供调试与溯源：前 5 条文档摘要、检索参数、原始网页结果
         metadata: Dict[str, Any] = {
             "documents": [
                 {
@@ -187,7 +188,7 @@ def create_knowledge_query_node(
             "web_results": web_results,
         }
 
-        if llm_client is None:
+        if llm_client is None:  # 无 LLM：用首条命中正文作答
             logger.warning("LLM client unavailable; returning top document content.")
             top_content = documents[0].get("content") or documents[0].get("document") or FALLBACK_MESSAGE
             metadata["reason"] = "llm_unavailable"
@@ -200,7 +201,7 @@ def create_knowledge_query_node(
                 steps=prior_steps + ["knowledge_query"],
             )
 
-        try:
+        try:  # 基于拼接上下文生成自然语言回答
             answer = await llm_client.chat(
                 system_prompt=system_prompt,
                 user_message=question,
@@ -211,7 +212,7 @@ def create_knowledge_query_node(
             logger.error("Knowledge answer generation failed: {}", exc)
             metadata["reason"] = "llm_failure"
             metadata["error"] = str(exc)
-            answer = documents[0].get("content") or documents[0].get("document") or FALLBACK_MESSAGE
+            answer = documents[0].get("content") or documents[0].get("document") or FALLBACK_MESSAGE  # LLM 失败降级
 
         final_answer = answer.strip() or FALLBACK_MESSAGE
 

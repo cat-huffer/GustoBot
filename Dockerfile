@@ -100,6 +100,8 @@ RUN sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' /etc
     rm -rf /var/lib/apt/lists/*
 
 # Install APOC plugin for Neo4j
+# 装 APOC 插件
+# APOC 是 Neo4j 常用扩展，提供大量过程/函数（你们 compose 里也开了 apoc.* 白名单）。
 ARG APOC_VERSION=5.18.0
 COPY neo4j_plugins/apoc-${APOC_VERSION}.jar /var/lib/neo4j/plugins/
 RUN ln -sf /var/lib/neo4j/plugins/apoc-${APOC_VERSION}.jar /var/lib/neo4j/plugins/apoc.jar
